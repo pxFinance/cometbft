@@ -3,25 +3,27 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
-	_ "net/http/pprof" //nolint: gosec // securely exposed on separate, optional port
+	_ "net/http/pprof" //nolint: gosec,gci // securely exposed on separate, optional port
+
+	"github.com/pxFinance/metrics/v2"
+	_ "github.com/lib/pq" //nolint: gci // provide the psql db driver.
 
 	dbm "github.com/cometbft/cometbft-db"
-
 	abci "github.com/cometbft/cometbft/abci/types"
-	"github.com/cometbft/cometbft/blocksync"
 	cfg "github.com/cometbft/cometbft/config"
-	cs "github.com/cometbft/cometbft/consensus"
 	"github.com/cometbft/cometbft/crypto"
-	"github.com/cometbft/cometbft/evidence"
-	"github.com/cometbft/cometbft/statesync"
-
-	cmtjson "github.com/cometbft/cometbft/libs/json"
+	"github.com/cometbft/cometbft/crypto/tmhash"
+	"github.com/cometbft/cometbft/internal/blocksync"
+	cs "github.com/cometbft/cometbft/internal/consensus"
+	"github.com/cometbft/cometbft/internal/evidence"
 	"github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/light"
 	mempl "github.com/cometbft/cometbft/mempool"
@@ -33,87 +35,146 @@ import (
 	"github.com/cometbft/cometbft/state/indexer"
 	"github.com/cometbft/cometbft/state/indexer/block"
 	"github.com/cometbft/cometbft/state/txindex"
+	"github.com/cometbft/cometbft/statesync"
 	"github.com/cometbft/cometbft/store"
 	"github.com/cometbft/cometbft/types"
 	"github.com/cometbft/cometbft/version"
-
-	_ "github.com/lib/pq" // provide the psql db driver
 )
 
 const readHeaderTimeout = 10 * time.Second
 
-// GenesisDocProvider returns a GenesisDoc.
+// ChecksummedGenesisDoc combines a GenesisDoc together with its
+// SHA256 checksum.
+type ChecksummedGenesisDoc struct {
+	GenesisDoc     *types.GenesisDoc
+	Sha256Checksum []byte
+}
+
+// Introduced to store parameters passed via cli and needed to start the node.
+// This parameters should not be stored or persisted in the config file.
+// This can then be further extended to include additional flags without further
+// API breaking changes.
+type CliParams struct {
+	// SHA-256 hash of the genesis file provided via the command line.
+	// This hash is used is compared against the computed hash of the
+	// actual genesis file or the hash stored in the database.
+	// If there is a mismatch between the hash provided via cli and the
+	// hash of the genesis file or the hash in the DB, the node will not boot.
+	GenesisHash []byte
+}
+
+// GenesisDocProvider returns a GenesisDoc together with its SHA256 checksum.
 // It allows the GenesisDoc to be pulled from sources other than the
 // filesystem, for instance from a distributed key-value store cluster.
-type GenesisDocProvider func() (*types.GenesisDoc, error)
+// It is the responsibility of the GenesisDocProvider to ensure that the SHA256
+// checksum correctly matches the GenesisDoc, that is:
+// sha256(GenesisDoc) == Sha256Checksum.
+type GenesisDocProvider func() (ChecksummedGenesisDoc, error)
 
 // DefaultGenesisDocProviderFunc returns a GenesisDocProvider that loads
 // the GenesisDoc from the config.GenesisFile() on the filesystem.
 func DefaultGenesisDocProviderFunc(config *cfg.Config) GenesisDocProvider {
-	return func() (*types.GenesisDoc, error) {
-		return types.GenesisDocFromFile(config.GenesisFile())
+	return func() (ChecksummedGenesisDoc, error) {
+		// FIXME: find a way to stream the file incrementally,
+		// for the JSON	parser and the checksum computation.
+		// https://github.com/cometbft/cometbft/issues/1302
+		jsonBlob, err := os.ReadFile(config.GenesisFile())
+		if err != nil {
+			return ChecksummedGenesisDoc{}, fmt.Errorf("couldn't read GenesisDoc file: %w", err)
+		}
+		incomingChecksum := tmhash.Sum(jsonBlob)
+		genDoc, err := types.GenesisDocFromJSON(jsonBlob)
+		if err != nil {
+			return ChecksummedGenesisDoc{}, err
+		}
+		return ChecksummedGenesisDoc{GenesisDoc: genDoc, Sha256Checksum: incomingChecksum}, nil
 	}
 }
 
 // Provider takes a config and a logger and returns a ready to go Node.
-type Provider func(*cfg.Config, log.Logger) (*Node, error)
+type Provider func(*cfg.Config, log.Logger, CliParams, func() (crypto.PrivKey, error)) (*Node, error)
 
 // DefaultNewNode returns a CometBFT node with default settings for the
 // PrivValidator, ClientCreator, GenesisDoc, and DBProvider.
-// It implements NodeProvider.
-func DefaultNewNode(config *cfg.Config, logger log.Logger) (*Node, error) {
+// It implements Provider.
+func DefaultNewNode(
+	config *cfg.Config,
+	logger log.Logger,
+	cliParams CliParams,
+	keyGenF func() (crypto.PrivKey, error),
+) (*Node, error) {
 	nodeKey, err := p2p.LoadOrGenNodeKey(config.NodeKeyFile())
 	if err != nil {
 		return nil, fmt.Errorf("failed to load or gen node key %s: %w", config.NodeKeyFile(), err)
 	}
 
-	return NewNode(config,
-		privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile()),
+	pv, err := privval.LoadOrGenFilePV(
+		config.PrivValidatorKeyFile(),
+		config.PrivValidatorStateFile(),
+		keyGenF,
+	)
+	if err != nil {
+		return nil, ErrorLoadOrGenFilePV{
+			Err:       err,
+			KeyFile:   config.PrivValidatorKeyFile(),
+			StateFile: config.PrivValidatorStateFile(),
+		}
+	}
+
+	return NewNodeWithCliParams(
+		context.Background(),
+		config,
+		pv,
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		DefaultGenesisDocProviderFunc(config),
 		cfg.DefaultDBProvider,
 		DefaultMetricsProvider(config.Instrumentation),
 		logger,
+		cliParams,
+		nil,
 	)
 }
 
 // MetricsProvider returns a consensus, p2p and mempool Metrics.
-type MetricsProvider func(chainID string) (*cs.Metrics, *p2p.Metrics, *mempl.Metrics, *sm.Metrics, *proxy.Metrics, *blocksync.Metrics, *statesync.Metrics)
+type MetricsProvider func(chainID string) (*cs.Metrics, *p2p.Metrics, *mempl.Metrics, *sm.Metrics, *store.Metrics, *proxy.Metrics, *blocksync.Metrics, *statesync.Metrics)
 
 // DefaultMetricsProvider returns Metrics build using Prometheus client library
 // if Prometheus is enabled. Otherwise, it returns no-op Metrics.
 func DefaultMetricsProvider(config *cfg.InstrumentationConfig) MetricsProvider {
-	return func(chainID string) (*cs.Metrics, *p2p.Metrics, *mempl.Metrics, *sm.Metrics, *proxy.Metrics, *blocksync.Metrics, *statesync.Metrics) {
+	return func(chainID string) (*cs.Metrics, *p2p.Metrics, *mempl.Metrics, *sm.Metrics, *store.Metrics, *proxy.Metrics, *blocksync.Metrics, *statesync.Metrics) {
 		if config.Prometheus {
 			return cs.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				p2p.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				mempl.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				sm.PrometheusMetrics(config.Namespace, "chain_id", chainID),
+				store.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				proxy.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				blocksync.PrometheusMetrics(config.Namespace, "chain_id", chainID),
 				statesync.PrometheusMetrics(config.Namespace, "chain_id", chainID)
 		}
-		return cs.NopMetrics(), p2p.NopMetrics(), mempl.NopMetrics(), sm.NopMetrics(), proxy.NopMetrics(), blocksync.NopMetrics(), statesync.NopMetrics()
+		return cs.NopMetrics(), p2p.NopMetrics(), mempl.NopMetrics(), sm.NopMetrics(), store.NopMetrics(), proxy.NopMetrics(), blocksync.NopMetrics(), statesync.NopMetrics()
 	}
 }
 
-//------------------------------------------------------------------------------
+type blockSyncReactor interface {
+	SwitchToBlockSync(state sm.State) error
+}
 
-func initDBs(config *cfg.Config, dbProvider cfg.DBProvider) (blockStore *store.BlockStore, stateDB dbm.DB, err error) {
-	var blockStoreDB dbm.DB
-	blockStoreDB, err = dbProvider(&cfg.DBContext{ID: "blockstore", Config: config})
+// ------------------------------------------------------------------------------
+
+func initDBs(config *cfg.Config, dbProvider cfg.DBProvider) (bsDB dbm.DB, stateDB dbm.DB, err error) {
+	bsDB, err = dbProvider(&cfg.DBContext{ID: "blockstore", Config: config})
 	if err != nil {
-		return
+		return nil, nil, err
 	}
-	blockStore = store.NewBlockStore(blockStoreDB)
 
 	stateDB, err = dbProvider(&cfg.DBContext{ID: "state", Config: config})
 	if err != nil {
-		return
+		return nil, nil, err
 	}
 
-	return
+	return bsDB, stateDB, nil
 }
 
 func createAndStartProxyAppConns(clientCreator proxy.ClientCreator, logger log.Logger, metrics *proxy.Metrics) (proxy.AppConns, error) {
@@ -146,7 +207,7 @@ func createAndStartIndexerService(
 		blockIndexer indexer.BlockIndexer
 	)
 
-	txIndexer, blockIndexer, allIndexersDisabled, err := block.IndexerFromConfigWithDisabledIndexers(config, dbProvider, chainID)
+	txIndexer, blockIndexer, allIndexersDisabled, err := block.IndexerFromConfig(config, dbProvider, chainID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -173,13 +234,14 @@ func doHandshake(
 	blockStore sm.BlockStore,
 	genDoc *types.GenesisDoc,
 	eventBus types.BlockEventPublisher,
+	appInfoResponse *abci.InfoResponse,
 	proxyApp proxy.AppConns,
 	consensusLogger log.Logger,
 ) error {
 	handshaker := cs.NewHandshaker(stateStore, state, blockStore, genDoc)
 	handshaker.SetLogger(consensusLogger)
 	handshaker.SetEventBus(eventBus)
-	if err := handshaker.HandshakeWithContext(ctx, proxyApp); err != nil {
+	if err := handshaker.Handshake(ctx, appInfoResponse, proxyApp); err != nil {
 		return fmt.Errorf("error during handshake: %v", err)
 	}
 	return nil
@@ -188,11 +250,11 @@ func doHandshake(
 func logNodeStartupInfo(state sm.State, pubKey crypto.PubKey, logger, consensusLogger log.Logger) {
 	// Log the version info.
 	logger.Info("Version info",
-		"tendermint_version", version.TMCoreSemVer,
+		"tendermint_version", version.CMTSemVer,
 		"abci", version.ABCISemVer,
 		"block", version.BlockProtocol,
 		"p2p", version.P2PProtocol,
-		"commit_hash", version.TMGitCommitHash,
+		"commit_hash", version.CMTGitCommitHash,
 	)
 
 	// If the state and software differ in block version, at least log it.
@@ -225,28 +287,36 @@ func createMempoolAndMempoolReactor(
 	config *cfg.Config,
 	proxyApp proxy.AppConns,
 	state sm.State,
-	waitForSync bool,
+	waitSync bool,
 	memplMetrics *mempl.Metrics,
 	logger log.Logger,
-) (mempl.Mempool, waitSyncReactor) {
-	logger = logger.With("module", "mempool")
-
+	appInfoResponse *abci.InfoResponse,
+	meter metrics.Meter,
+) (mempl.Mempool, waitSyncP2PReactor) {
 	switch config.Mempool.Type {
 	// allow empty string for backward compatibility
 	case cfg.MempoolTypeFlood, "":
+		lanesInfo, err := mempl.BuildLanesInfo(appInfoResponse.LanePriorities, appInfoResponse.DefaultLane)
+		if err != nil {
+			panic(fmt.Sprintf("could not get lanes info from app: %s", err))
+		}
+
+		logger = logger.With("module", "mempool")
 		mp := mempl.NewCListMempool(
 			config.Mempool,
 			proxyApp.Mempool(),
+			lanesInfo,
 			state.LastBlockHeight,
 			mempl.WithMetrics(memplMetrics),
 			mempl.WithPreCheck(sm.TxPreCheck(state)),
 			mempl.WithPostCheck(sm.TxPostCheck(state)),
+			mempl.WithMeter(meter),
 		)
 		mp.SetLogger(logger)
 		reactor := mempl.NewReactor(
 			config.Mempool,
 			mp,
-			waitForSync,
+			waitSync,
 		)
 		if config.Consensus.WaitForTxs() {
 			mp.EnableTxsAvailable()
@@ -258,17 +328,6 @@ func createMempoolAndMempoolReactor(
 		// Strictly speaking, there's no need to have a `mempl.NopMempoolReactor`, but
 		// adding it leads to a cleaner code.
 		return &mempl.NopMempool{}, mempl.NewNopMempoolReactor()
-	case cfg.MempoolTypeApp:
-		mp := mempl.NewAppMempool(
-			config.Mempool,
-			proxyApp.Mempool(),
-			mempl.WithAMLogger(logger),
-			mempl.WithAMMetrics(memplMetrics),
-		)
-		reactor := mempl.NewAppReactor(config.Mempool, mp, waitForSync)
-		reactor.SetLogger(logger)
-
-		return mp, reactor
 	default:
 		panic(fmt.Sprintf("unknown mempool type: %q", config.Mempool.Type))
 	}
@@ -282,7 +341,7 @@ func createEvidenceReactor(config *cfg.Config, dbProvider cfg.DBProvider,
 		return nil, nil, err
 	}
 	evidenceLogger := logger.With("module", "evidence")
-	evidencePool, err := evidence.NewPool(evidenceDB, stateStore, blockStore)
+	evidencePool, err := evidence.NewPool(evidenceDB, stateStore, blockStore, evidence.WithDBKeyLayout(config.Storage.ExperimentalKeyLayout))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -291,40 +350,30 @@ func createEvidenceReactor(config *cfg.Config, dbProvider cfg.DBProvider,
 	return evidenceReactor, evidencePool, nil
 }
 
-func createBlocksyncReactor(
-	enabled bool,
-	config *cfg.Config,
+func createBlocksyncReactor(config *cfg.Config,
 	state sm.State,
 	blockExec *sm.BlockExecutor,
 	blockStore *store.BlockStore,
+	blockSync bool,
 	localAddr crypto.Address,
-	offlineStateSyncHeight int64,
 	logger log.Logger,
 	metrics *blocksync.Metrics,
-) (p2p.Reactor, error) {
-	version := config.BlockSync.Version
-	if version != "v0" {
-		return nil, fmt.Errorf("invalid blocksync version %q. v1, v2 are deprecated. Use v0", version)
+	offlineStateSyncHeight int64,
+) (bcReactor p2p.Reactor, err error) {
+	switch config.BlockSync.Version {
+	case "v0":
+		bcReactor = blocksync.NewReactor(state.Copy(), blockExec, blockStore, blockSync, localAddr, metrics, offlineStateSyncHeight)
+	case "v1", "v2":
+		return nil, fmt.Errorf("block sync version %s has been deprecated. Please use v0", config.BlockSync.Version)
+	default:
+		return nil, fmt.Errorf("unknown block sync version %s", config.BlockSync.Version)
 	}
 
-	bcReactor := blocksync.NewReactor(
-		enabled,
-		config.BlockSync.AdaptiveSync,
-		state.Copy(),
-		blockExec,
-		blockStore,
-		localAddr,
-		offlineStateSyncHeight,
-		metrics,
-	)
-
 	bcReactor.SetLogger(logger.With("module", "blocksync"))
-
 	return bcReactor, nil
 }
 
-func createConsensusReactor(
-	config *cfg.Config,
+func createConsensusReactor(config *cfg.Config,
 	state sm.State,
 	blockExec *sm.BlockExecutor,
 	blockStore sm.BlockStore,
@@ -332,10 +381,11 @@ func createConsensusReactor(
 	evidencePool *evidence.Pool,
 	privValidator types.PrivValidator,
 	csMetrics *cs.Metrics,
-	waitForSync bool,
+	waitSync bool,
 	eventBus *types.EventBus,
-	logger log.Logger,
+	consensusLogger log.Logger,
 	offlineStateSyncHeight int64,
+	meter metrics.Meter,
 ) (*cs.Reactor, *cs.State) {
 	consensusState := cs.NewState(
 		config.Consensus,
@@ -345,56 +395,27 @@ func createConsensusReactor(
 		mempool,
 		evidencePool,
 		cs.StateMetrics(csMetrics),
+		cs.StateMeter(meter),
 		cs.OfflineStateSyncHeight(offlineStateSyncHeight),
 	)
-	consensusState.SetLogger(logger)
+	consensusState.SetLogger(consensusLogger)
 	if privValidator != nil {
 		consensusState.SetPrivValidator(privValidator)
 	}
-
-	consensusReactor := cs.NewReactor(consensusState, waitForSync, cs.ReactorMetrics(csMetrics))
-	consensusReactor.SetLogger(logger)
+	consensusReactor := cs.NewReactor(
+		consensusState,
+		waitSync,
+		cs.ReactorMetrics(csMetrics),
+		cs.ReactorMeter(meter),
+	)
+	consensusReactor.SetLogger(consensusLogger)
 	// services which will be publishing and/or subscribing for messages (events)
 	// consensusReactor will set it on consensusState and blockExecutor
 	consensusReactor.SetEventBus(eventBus)
-
 	return consensusReactor, consensusState
 }
 
-func createCometTransportWithSwitch(
-	config *cfg.Config,
-	nodeInfo p2p.NodeInfo,
-	nodeKey *p2p.NodeKey,
-	proxyApp proxy.AppConns,
-	mempoolReactor p2p.Reactor,
-	bcReactor p2p.Reactor,
-	stateSyncReactor *statesync.Reactor,
-	consensusReactor *cs.Reactor,
-	evidenceReactor *evidence.Reactor,
-	p2pMetrics *p2p.Metrics,
-	logger log.Logger,
-) (p2p.Transport, *p2p.Switch) {
-	transport, peerFilters := createCometTransport(config, nodeInfo, nodeKey, proxyApp)
-
-	sw := createCometSwitch(
-		config,
-		transport,
-		p2pMetrics,
-		peerFilters,
-		mempoolReactor,
-		bcReactor,
-		stateSyncReactor,
-		consensusReactor,
-		evidenceReactor,
-		nodeInfo,
-		nodeKey,
-		logger,
-	)
-
-	return transport, sw
-}
-
-func createCometTransport(
+func createTransport(
 	config *cfg.Config,
 	nodeInfo p2p.NodeInfo,
 	nodeKey *p2p.NodeKey,
@@ -421,8 +442,8 @@ func createCometTransport(
 			connFilters,
 			// ABCI query for address filtering.
 			func(_ p2p.ConnSet, c net.Conn, _ []net.IP) error {
-				res, err := proxyApp.Query().Query(context.TODO(), &abci.RequestQuery{
-					Path: fmt.Sprintf("/p2p/filter/addr/%s", c.RemoteAddr().String()),
+				res, err := proxyApp.Query().Query(context.TODO(), &abci.QueryRequest{
+					Path: "/p2p/filter/addr/" + c.RemoteAddr().String(),
 				})
 				if err != nil {
 					return err
@@ -439,7 +460,7 @@ func createCometTransport(
 			peerFilters,
 			// ABCI query for ID filtering.
 			func(_ p2p.IPeerSet, p p2p.Peer) error {
-				res, err := proxyApp.Query().Query(context.TODO(), &abci.RequestQuery{
+				res, err := proxyApp.Query().Query(context.TODO(), &abci.QueryRequest{
 					Path: fmt.Sprintf("/p2p/filter/id/%s", p.ID()),
 				})
 				if err != nil {
@@ -463,8 +484,7 @@ func createCometTransport(
 	return transport, peerFilters
 }
 
-func createCometSwitch(
-	config *cfg.Config,
+func createSwitch(config *cfg.Config,
 	transport p2p.Transport,
 	p2pMetrics *p2p.Metrics,
 	peerFilters []p2p.PeerFilterFunc,
@@ -499,11 +519,8 @@ func createCometSwitch(
 	return sw
 }
 
-func createAddrBookAndSetOnSwitch(
-	config *cfg.Config,
-	sw *p2p.Switch,
-	p2pLogger log.Logger,
-	nodeKey *p2p.NodeKey,
+func createAddrBookAndSetOnSwitch(config *cfg.Config, sw *p2p.Switch,
+	p2pLogger log.Logger, nodeKey *p2p.NodeKey,
 ) (pex.AddrBook, error) {
 	addrBook := pex.NewAddrBook(config.P2P.AddrBookFile(), config.P2P.AddrBookStrict)
 	addrBook.SetLogger(p2pLogger.With("book", config.P2P.AddrBookFile()))
@@ -529,191 +546,161 @@ func createAddrBookAndSetOnSwitch(
 	return addrBook, nil
 }
 
-func createPEXReactorAndAddToSwitch(
-	addrBook pex.AddrBook,
-	config *cfg.Config,
-	sw p2p.Switcher,
-	logger log.Logger,
+func createPEXReactorAndAddToSwitch(addrBook pex.AddrBook, config *cfg.Config,
+	sw *p2p.Switch, logger log.Logger,
 ) *pex.Reactor {
-	cfg := &pex.ReactorConfig{
-		Seeds:    splitAndTrimEmpty(config.P2P.Seeds, ",", " "),
-		SeedMode: config.P2P.SeedMode,
-		// See consensus/reactor.go: blocksToContributeToBecomeGoodPeer 10000
-		// blocks assuming 10s blocks ~ 28 hours.
-		// TODO (melekes): make it dynamic based on the actual block latencies
-		// from the live network.
-		// https://github.com/tendermint/tendermint/issues/3523
-		SeedDisconnectWaitPeriod:     28 * time.Hour,
-		PersistentPeersMaxDialPeriod: config.P2P.PersistentPeersMaxDialPeriod,
-	}
-
 	// TODO persistent peers ? so we can have their DNS addrs saved
-	pexReactor := pex.NewReactor(addrBook, cfg)
+	pexReactor := pex.NewReactor(addrBook,
+		&pex.ReactorConfig{
+			Seeds:    splitAndTrimEmpty(config.P2P.Seeds, ",", " "),
+			SeedMode: config.P2P.SeedMode,
+			// See consensus/reactor.go: blocksToContributeToBecomeGoodPeer 10000
+			// blocks assuming 10s blocks ~ 28 hours.
+			// TODO (melekes): make it dynamic based on the actual block latencies
+			// from the live network.
+			// https://github.com/tendermint/tendermint/issues/3523
+			SeedDisconnectWaitPeriod:     28 * time.Hour,
+			PersistentPeersMaxDialPeriod: config.P2P.PersistentPeersMaxDialPeriod,
+		})
 	pexReactor.SetLogger(logger.With("module", "pex"))
-
 	sw.AddReactor("PEX", pexReactor)
-
 	return pexReactor
 }
 
 // startStateSync starts an asynchronous state sync process, then switches to block sync mode.
-func (n *Node) performStateSync() error {
-	type blocksyncEnabler interface {
-		Enable(sm.State) error
-	}
+func startStateSync(
+	ssR *statesync.Reactor,
+	bcR blockSyncReactor,
+	stateProvider statesync.StateProvider,
+	config *cfg.StateSyncConfig,
+	stateStore sm.Store,
+	blockStore *store.BlockStore,
+	state sm.State,
+	dbKeyLayoutVersion string,
+) error {
+	ssR.Logger.Info("Starting state sync")
 
-	type mempoolEnabler interface {
-		EnableInOutTxs()
-	}
-
-	var (
-		state  = n.stateSyncGenesis
-		config = n.config.StateSync
-		logger = n.stateSyncReactor.Logger
-
-		mempoolReactor   mempoolEnabler
-		blockSyncReactor blocksyncEnabler
-	)
-
-	logger.Info("Starting state sync")
-
-	// validate all reactors
-	blockSyncReactor, ok := n.bcReactor.(blocksyncEnabler)
-	if !ok {
-		return fmt.Errorf("invalid block sync reactor")
-	}
-
-	if n.mempoolReactor != nil {
-		mempoolReactor, ok = n.mempoolReactor.(mempoolEnabler)
-		if !ok {
-			return fmt.Errorf("invalid mempool reactor")
-		}
-	}
-
-	if n.stateSyncProvider == nil {
+	if stateProvider == nil {
+		var err error
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-
-		var err error
-		n.stateSyncProvider, err = statesync.NewLightClientStateProvider(
+		stateProvider, err = statesync.NewLightClientStateProviderWithDBKeyVersion(
 			ctx,
-			state.ChainID,
-			state.Version,
-			state.InitialHeight,
-			config.RPCServers,
-			light.TrustOptions{
+			state.ChainID, state.Version, state.InitialHeight,
+			config.RPCServers, light.TrustOptions{
 				Period: config.TrustPeriod,
 				Height: config.TrustHeight,
 				Hash:   config.TrustHashBytes(),
-			},
-			logger.With("module", "light"),
-		)
-
+			}, ssR.Logger.With("module", "light"),
+			dbKeyLayoutVersion)
 		if err != nil {
 			return fmt.Errorf("failed to set up light client state provider: %w", err)
 		}
 	}
 
 	go func() {
-		state, commit, err := n.stateSyncReactor.Sync(n.stateSyncProvider, config.DiscoveryTime)
+		state, commit, err := ssR.Sync(stateProvider, config.DiscoveryTime)
 		if err != nil {
-			logger.Error("State sync failed", "err", err)
+			ssR.Logger.Error("State sync failed", "err", err)
+			return
+		}
+		err = stateStore.Bootstrap(state)
+		if err != nil {
+			ssR.Logger.Error("Failed to bootstrap node with new state", "err", err)
+			return
+		}
+		err = blockStore.SaveSeenCommit(state.LastBlockHeight, commit)
+		if err != nil {
+			ssR.Logger.Error("Failed to store last seen commit", "err", err)
 			return
 		}
 
-		err = n.stateStore.Bootstrap(state)
+		err = bcR.SwitchToBlockSync(state)
 		if err != nil {
-			logger.Error("Failed to bootstrap node with new state", "err", err)
-			return
-		}
-
-		err = n.blockStore.SaveSeenCommit(state.LastBlockHeight, commit)
-		if err != nil {
-			logger.Error("Failed to store last seen commit", "err", err)
-			return
-		}
-
-		// Adaptive sync ingests blocks through consensus internals, so consensus
-		// must be switched out of wait-sync mode before blocksync is enabled.
-		if n.config.BlockSync.AdaptiveSync {
-			n.consensusReactor.SwitchToConsensus(state, true)
-			if mempoolReactor != nil {
-				mempoolReactor.EnableInOutTxs()
-			}
-		}
-
-		if err := blockSyncReactor.Enable(state); err != nil {
-			logger.Error("Failed to switch to block sync", "err", err)
+			ssR.Logger.Error("Failed to switch to block sync", "err", err)
 			return
 		}
 	}()
-
 	return nil
 }
 
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 
-var genesisDocKey = []byte("genesisDoc")
+var (
+	genesisDocKey     = []byte("genesisDoc")
+	genesisDocHashKey = []byte("genesisDocHash")
+)
+
+func LoadStateFromDBOrGenesisDocProviderWithConfig(
+	stateDB dbm.DB,
+	genesisDocProvider GenesisDocProvider,
+	operatorGenesisHashHex string,
+	config *cfg.Config,
+) (sm.State, *types.GenesisDoc, error) {
+	// Get genesis doc hash
+	genDocHash, err := stateDB.Get(genesisDocHashKey)
+	if err != nil {
+		return sm.State{}, nil, fmt.Errorf("error retrieving genesis doc hash: %w", err)
+	}
+	csGenDoc, err := genesisDocProvider()
+	if err != nil {
+		return sm.State{}, nil, err
+	}
+
+	if err = csGenDoc.GenesisDoc.ValidateAndComplete(); err != nil {
+		return sm.State{}, nil, fmt.Errorf("error in genesis doc: %w", err)
+	}
+
+	// Validate that existing or recently saved genesis file hash matches optional --genesis_hash passed by operator
+	if operatorGenesisHashHex != "" {
+		decodedOperatorGenesisHash, err := hex.DecodeString(operatorGenesisHashHex)
+		if err != nil {
+			return sm.State{}, nil, errors.New("genesis hash provided by operator cannot be decoded")
+		}
+		if !bytes.Equal(csGenDoc.Sha256Checksum, decodedOperatorGenesisHash) {
+			return sm.State{}, nil, errors.New("genesis doc hash in db does not match passed --genesis_hash value")
+		}
+	}
+
+	if len(genDocHash) == 0 {
+		// Save the genDoc hash in the store if it doesn't already exist for future verification
+		if err = stateDB.SetSync(genesisDocHashKey, csGenDoc.Sha256Checksum); err != nil {
+			return sm.State{}, nil, fmt.Errorf("failed to save genesis doc hash to db: %w", err)
+		}
+	} else {
+		if !bytes.Equal(genDocHash, csGenDoc.Sha256Checksum) {
+			return sm.State{}, nil, errors.New("genesis doc hash in db does not match loaded genesis doc")
+		}
+	}
+
+	dbKeyLayoutVersion := ""
+	if config != nil {
+		dbKeyLayoutVersion = config.Storage.ExperimentalKeyLayout
+	}
+	stateStore := sm.NewStore(stateDB, sm.StoreOptions{
+		DiscardABCIResponses: false,
+		DBKeyLayout:          dbKeyLayoutVersion,
+	})
+
+	state, err := stateStore.LoadFromDBOrGenesisDoc(csGenDoc.GenesisDoc)
+	if err != nil {
+		return sm.State{}, nil, err
+	}
+	return state, csGenDoc.GenesisDoc, nil
+}
 
 // LoadStateFromDBOrGenesisDocProvider attempts to load the state from the
 // database, or creates one using the given genesisDocProvider. On success this also
 // returns the genesis doc loaded through the given provider.
+
+// Note that if you don't have a version of the key layout set in your DB already,
+// and no config is passed, it will default to v1.
 func LoadStateFromDBOrGenesisDocProvider(
 	stateDB dbm.DB,
 	genesisDocProvider GenesisDocProvider,
+	operatorGenesisHashHex string,
 ) (sm.State, *types.GenesisDoc, error) {
-	// Get genesis doc
-	genDoc, err := loadGenesisDoc(stateDB)
-	if err != nil {
-		genDoc, err = genesisDocProvider()
-		if err != nil {
-			return sm.State{}, nil, err
-		}
-
-		err = genDoc.ValidateAndComplete()
-		if err != nil {
-			return sm.State{}, nil, fmt.Errorf("error in genesis doc: %w", err)
-		}
-		// save genesis doc to prevent a certain class of user errors (e.g. when it
-		// was changed, accidentally or not). Also good for audit trail.
-		if err := saveGenesisDoc(stateDB, genDoc); err != nil {
-			return sm.State{}, nil, err
-		}
-	}
-	stateStore := sm.NewStore(stateDB, sm.StoreOptions{
-		DiscardABCIResponses: false,
-	})
-	state, err := stateStore.LoadFromDBOrGenesisDoc(genDoc)
-	if err != nil {
-		return sm.State{}, nil, err
-	}
-	return state, genDoc, nil
-}
-
-// panics if failed to unmarshal bytes
-func loadGenesisDoc(db dbm.DB) (*types.GenesisDoc, error) {
-	b, err := db.Get(genesisDocKey)
-	if err != nil {
-		panic(err)
-	}
-	if len(b) == 0 {
-		return nil, errors.New("genesis doc not found")
-	}
-	var genDoc *types.GenesisDoc
-	err = cmtjson.Unmarshal(b, &genDoc)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to load genesis doc due to unmarshaling error: %v (bytes: %X)", err, b))
-	}
-	return genDoc, nil
-}
-
-// panics if failed to marshal the given genesis document
-func saveGenesisDoc(db dbm.DB, genDoc *types.GenesisDoc) error {
-	b, err := cmtjson.Marshal(genDoc)
-	if err != nil {
-		return fmt.Errorf("failed to save genesis doc due to marshaling error: %w", err)
-	}
-	return db.SetSync(genesisDocKey, b)
+	return LoadStateFromDBOrGenesisDocProviderWithConfig(stateDB, genesisDocProvider, operatorGenesisHashHex, nil)
 }
 
 func createAndStartPrivValidatorSocketClient(

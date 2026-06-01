@@ -20,7 +20,6 @@ func TestVariousLevels(t *testing.T) {
 			strings.Join([]string{
 				`{"_msg":"here","level":"debug","this is":"debug log"}`,
 				`{"_msg":"here","level":"info","this is":"info log"}`,
-				`{"_msg":"here","level":"warn","this is":"warn log"}`,
 				`{"_msg":"here","level":"error","this is":"error log"}`,
 			}, "\n"),
 		},
@@ -30,7 +29,6 @@ func TestVariousLevels(t *testing.T) {
 			strings.Join([]string{
 				`{"_msg":"here","level":"debug","this is":"debug log"}`,
 				`{"_msg":"here","level":"info","this is":"info log"}`,
-				`{"_msg":"here","level":"warn","this is":"warn log"}`,
 				`{"_msg":"here","level":"error","this is":"error log"}`,
 			}, "\n"),
 		},
@@ -39,15 +37,6 @@ func TestVariousLevels(t *testing.T) {
 			log.AllowInfo(),
 			strings.Join([]string{
 				`{"_msg":"here","level":"info","this is":"info log"}`,
-				`{"_msg":"here","level":"warn","this is":"warn log"}`,
-				`{"_msg":"here","level":"error","this is":"error log"}`,
-			}, "\n"),
-		},
-		{
-			"AllowWarn",
-			log.AllowWarn(),
-			strings.Join([]string{
-				`{"_msg":"here","level":"warn","this is":"warn log"}`,
 				`{"_msg":"here","level":"error","this is":"error log"}`,
 			}, "\n"),
 		},
@@ -66,14 +55,12 @@ func TestVariousLevels(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.NewFilter(log.NewTMJSONLoggerNoTS(&buf), tc.allowed)
 
 			logger.Debug("here", "this is", "debug log")
 			logger.Info("here", "this is", "info log")
-			logger.Warn("here", "this is", "warn log")
 			logger.Error("here", "this is", "error log")
 
 			if want, have := tc.want, strings.TrimSpace(buf.String()); want != have {

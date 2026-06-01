@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	tmp2p "github.com/cometbft/cometbft/proto/tendermint/p2p"
+	tmp2p "github.com/cometbft/cometbft/api/cometbft/p2p/v1"
 )
 
-// EmptyNetAddress defines the string representation of an empty NetAddress
+// EmptyNetAddress defines the string representation of an empty NetAddress.
 const EmptyNetAddress = "<nil-NetAddress>"
 
 // NetAddress defines information about a peer on the network
@@ -66,7 +66,7 @@ func NewNetAddress(id ID, addr net.Addr) *NetAddress {
 // NewNetAddressString returns a new NetAddress using the provided address in
 // the form of "ID@IP:Port".
 // Also resolves the host if host is not an IP.
-// Errors are of type ErrNetAddressXxx where Xxx is in (NoID, Invalid, Lookup)
+// Errors are of type ErrNetAddressXxx where Xxx is in (NoID, Invalid, Lookup).
 func NewNetAddressString(addr string) (*NetAddress, error) {
 	addrWithoutProtocol := removeProtocolIfDefined(addr)
 	spl := strings.Split(addrWithoutProtocol, "@")
@@ -208,7 +208,7 @@ func (na *NetAddress) Same(other any) bool {
 	return false
 }
 
-// String representation: <ID>@<IP>:<PORT>
+// String representation: <ID>@<IP>:<PORT>.
 func (na *NetAddress) String() string {
 	if na == nil {
 		return EmptyNetAddress
@@ -256,7 +256,8 @@ func (na *NetAddress) Routable() bool {
 		return false
 	}
 	// TODO(oga) bitcoind doesn't include RFC3849 here, but should we?
-	return !na.RFC1918() && !na.RFC3927() && !na.RFC4862() && !na.RFC4193() && !na.RFC4843() && !na.Local()
+	return !(na.RFC1918() || na.RFC3927() || na.RFC4862() ||
+		na.RFC4193() || na.RFC4843() || na.Local())
 }
 
 // For IPv4 these are either a 0 or all bits set address. For IPv6 a zero
@@ -289,7 +290,7 @@ func (na *NetAddress) Local() bool {
 // ReachabilityTo checks whenever o can be reached from na.
 func (na *NetAddress) ReachabilityTo(o *NetAddress) int {
 	const (
-		Unreachable = 0
+		unreachable = 0
 		Default     = iota
 		Teredo
 		Ipv6Weak
@@ -298,7 +299,7 @@ func (na *NetAddress) ReachabilityTo(o *NetAddress) int {
 	)
 	switch {
 	case !na.Routable():
-		return Unreachable
+		return unreachable
 	case na.RFC4380():
 		switch {
 		case !o.Routable():
@@ -345,7 +346,7 @@ func (na *NetAddress) ReachabilityTo(o *NetAddress) int {
 // RFC4843: IPv6 ORCHID: (2001:10::/28)
 // RFC4862: IPv6 Autoconfig (FE80::/64)
 // RFC6052: IPv6 well known prefix (64:FF9B::/96)
-// RFC6145: IPv6 IPv4 translated address ::FFFF:0:0:0/96
+// RFC6145: IPv6 IPv4 translated address ::FFFF:0:0:0/96.
 var (
 	rfc1918_10  = net.IPNet{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)}
 	rfc1918_192 = net.IPNet{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)}
@@ -360,20 +361,20 @@ var (
 	rfc6052     = net.IPNet{IP: net.ParseIP("64:FF9B::"), Mask: net.CIDRMask(96, 128)}
 	rfc6145     = net.IPNet{IP: net.ParseIP("::FFFF:0:0:0"), Mask: net.CIDRMask(96, 128)}
 	zero4       = net.IPNet{IP: net.ParseIP("0.0.0.0"), Mask: net.CIDRMask(8, 32)}
-)
 
-// onionCatNet defines the IPv6 address block used to support Tor.
-// bitcoind encodes a .onion address as a 16 byte number by decoding the
-// address prior to the .onion (i.e. the key hash) base32 into a ten
-// byte number. It then stores the first 6 bytes of the address as
-// 0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43.
-//
-// This is the same range used by OnionCat, which is part of the
-// RFC4193 unique local IPv6 range.
-//
-// In summary the format is:
-// { magic 6 bytes, 10 bytes base32 decode of key hash }
-var onionCatNet = ipNet("fd87:d87e:eb43::", 48, 128)
+	// onionCatNet defines the IPv6 address block used to support Tor.
+	// bitcoind encodes a .onion address as a 16 byte number by decoding the
+	// address prior to the .onion (i.e. the key hash) base32 into a ten
+	// byte number. It then stores the first 6 bytes of the address as
+	// 0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43.
+	//
+	// This is the same range used by OnionCat, which is part of the
+	// RFC4193 unique local IPv6 range.
+	//
+	// In summary the format is:
+	// { magic 6 bytes, 10 bytes base32 decode of key hash }.
+	onionCatNet = ipNet("fd87:d87e:eb43::", 48, 128)
+)
 
 // ipNet returns a net.IPNet struct given the passed IP address string, number
 // of one bits to include at the start of the mask, and the total number of bits

@@ -3,7 +3,6 @@ package types
 import (
 	"github.com/cometbft/cometbft/crypto/bls12381"
 	"github.com/cometbft/cometbft/crypto/ed25519"
-	"github.com/cometbft/cometbft/crypto/mldsa65"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
 )
 
@@ -11,9 +10,8 @@ import (
 // and Vote.
 // XXX: secp256k1 does not have max signature size defined.
 var MaxSignatureSize = cmtmath.MaxInt(
-	cmtmath.MaxInt(ed25519.SignatureSize, bls12381.SignatureLength),
-	mldsa65.SignatureSize,
-)
+	ed25519.SignatureSize,
+	bls12381.SignatureLength)
 
 // Signable is an interface for all signable things.
 // It typically removes signatures before serializing.

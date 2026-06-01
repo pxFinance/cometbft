@@ -3,8 +3,8 @@
 package p2p
 
 import (
-	"github.com/go-kit/kit/metrics/discard"
-	prometheus "github.com/go-kit/kit/metrics/prometheus"
+	"github.com/cometbft/cometbft/libs/metrics/discard"
+	prometheus "github.com/cometbft/cometbft/libs/metrics/prometheus"
 	stdprometheus "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -20,23 +20,11 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "peers",
 			Help:      "Number of peers.",
 		}, labels).With(labelsAndValues...),
-		PeerReceiveBytesTotal: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
+		PeerPendingSendBytes: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
-			Name:      "peer_receive_bytes_total",
-			Help:      "Number of bytes received from a given peer.",
-		}, append(labels, "peer_id", "chID")).With(labelsAndValues...),
-		PeerSendBytesTotal: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "peer_send_bytes_total",
-			Help:      "Number of bytes sent to a given peer.",
-		}, append(labels, "peer_id", "chID")).With(labelsAndValues...),
-		PeerSendQueueSize: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "peer_send_queue_size",
-			Help:      "Number of messages that are currently being sent to a given peer.",
+			Name:      "peer_pending_send_bytes",
+			Help:      "Pending bytes to be sent to a given peer.",
 		}, append(labels, "peer_id")).With(labelsAndValues...),
 		NumTxs: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
@@ -56,52 +44,15 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "message_send_bytes_total",
 			Help:      "Number of bytes of each message type sent.",
 		}, append(labels, "message_type")).With(labelsAndValues...),
-		MessagesReceived: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "messages_received",
-			Help:      "Number of messages received before being processed by the reactor",
-		}, append(labels, "message_type", "reactor")).With(labelsAndValues...),
-		MessagesReactorInFlight: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "messages_reactor_in_flight",
-			Help:      "Number of messages in flight (wip by reactor)",
-		}, append(labels, "message_type", "reactor")).With(labelsAndValues...),
-		MessagesReactorPendingDuration: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "messages_reactor_pending_duration",
-			Help:      "Duration between receiving a message and submitting it to the reactor",
-		}, append(labels, "message_type", "reactor")).With(labelsAndValues...),
-		MessageReactorReceiveDuration: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "message_reactor_receive_duration",
-			Help:      "Duration of the message receive operation by reactor",
-		}, append(labels, "message_type", "reactor")).With(labelsAndValues...),
-		MessageReactorQueueConcurrency: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "message_reactor_queue_concurrency",
-			Help:      "Concurrency of the incoming message queue for a given reactor",
-		}, append(labels, "reactor")).With(labelsAndValues...),
 	}
 }
 
 func NopMetrics() *Metrics {
 	return &Metrics{
-		Peers:                          discard.NewGauge(),
-		PeerReceiveBytesTotal:          discard.NewCounter(),
-		PeerSendBytesTotal:             discard.NewCounter(),
-		PeerSendQueueSize:              discard.NewGauge(),
-		NumTxs:                         discard.NewGauge(),
-		MessageReceiveBytesTotal:       discard.NewCounter(),
-		MessageSendBytesTotal:          discard.NewCounter(),
-		MessagesReceived:               discard.NewCounter(),
-		MessagesReactorInFlight:        discard.NewGauge(),
-		MessagesReactorPendingDuration: discard.NewHistogram(),
-		MessageReactorReceiveDuration:  discard.NewHistogram(),
-		MessageReactorQueueConcurrency: discard.NewGauge(),
+		Peers:                    discard.NewGauge(),
+		PeerPendingSendBytes:     discard.NewGauge(),
+		NumTxs:                   discard.NewGauge(),
+		MessageReceiveBytesTotal: discard.NewCounter(),
+		MessageSendBytesTotal:    discard.NewCounter(),
 	}
 }

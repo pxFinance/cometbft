@@ -3,8 +3,8 @@
 package mempool
 
 import (
-	"github.com/go-kit/kit/metrics/discard"
-	prometheus "github.com/go-kit/kit/metrics/prometheus"
+	"github.com/cometbft/cometbft/libs/metrics/discard"
+	prometheus "github.com/cometbft/cometbft/libs/metrics/prometheus"
 	stdprometheus "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -18,14 +18,34 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "size",
-			Help:      "Number of uncommitted transactions in the mempool.",
+			Help:      "Number of uncommitted transactions in the mempool.  Deprecated: this value can be obtained as the sum of LaneSize.",
 		}, labels).With(labelsAndValues...),
 		SizeBytes: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "size_bytes",
-			Help:      "Total size of the mempool in bytes.",
+			Help:      "Total size of the mempool in bytes.  Deprecated: this value can be obtained as the sum of LaneBytes.",
 		}, labels).With(labelsAndValues...),
+		LaneSize: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "lane_size",
+			Help:      "Number of uncommitted transactions per lane.",
+		}, append(labels, "lane")).With(labelsAndValues...),
+		LaneBytes: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "lane_bytes",
+			Help:      "Number of used bytes per lane.",
+		}, append(labels, "lane")).With(labelsAndValues...),
+		TxLifeSpan: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "tx_life_span",
+			Help:      "Duration in ms of a transaction in the mempool.",
+
+			Buckets: []float64{50, 100, 200, 500, 1000},
+		}, append(labels, "lane")).With(labelsAndValues...),
 		TxSizeBytes: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
@@ -38,19 +58,19 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "failed_txs",
-			Help:      "FailedTxs defines the number of failed transactions. These are transactions that failed to make it into the mempool because they were deemed invalid. metrics:Number of failed transactions.",
+			Help:      "Number of failed transactions.",
 		}, labels).With(labelsAndValues...),
 		RejectedTxs: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "rejected_txs",
-			Help:      "RejectedTxs defines the number of rejected transactions. These are transactions that failed to make it into the mempool due to resource limits, e.g. mempool is full. metrics:Number of rejected transactions.",
+			Help:      "Number of rejected transactions.",
 		}, labels).With(labelsAndValues...),
 		EvictedTxs: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "evicted_txs",
-			Help:      "EvictedTxs defines the number of evicted transactions. These are valid transactions that passed CheckTx and make it into the mempool but later became invalid. metrics:Number of evicted transactions.",
+			Help:      "Number of evicted transactions.",
 		}, labels).With(labelsAndValues...),
 		RecheckTimes: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: namespace,
@@ -58,31 +78,35 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "recheck_times",
 			Help:      "Number of times transactions are rechecked in the mempool.",
 		}, labels).With(labelsAndValues...),
-		ActiveOutboundConnections: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "active_outbound_connections",
-			Help:      "Number of connections being actively used for gossiping transactions (experimental feature).",
-		}, labels).With(labelsAndValues...),
 		AlreadyReceivedTxs: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "already_received_txs",
 			Help:      "Number of duplicate transaction reception.",
 		}, labels).With(labelsAndValues...),
-		BatchSize: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
+		ActiveOutboundConnections: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
-			Name:      "batch_size",
-			Help:      "BatchSize size of an inbound/outbound batch of mempool txs (in txs num, not bytes)",
-
-			Buckets: []float64{1, 2, 5, 10, 30, 50, 100, 200, 300},
-		}, append(labels, "dir")).With(labelsAndValues...),
-		ReapedTxs: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
+			Name:      "active_outbound_connections",
+			Help:      "Number of connections being actively used for gossiping transactions (experimental feature).",
+		}, labels).With(labelsAndValues...),
+		RecheckDurationSeconds: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
-			Name:      "reaped_txs",
-			Help:      "ReapedTxs is the number of transactions reaped from the mempool",
+			Name:      "recheck_duration_seconds",
+			Help:      "Cumulative time spent rechecking transactions",
+		}, labels).With(labelsAndValues...),
+		DisabledRoutes: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "disabled_routes",
+			Help:      "Number of disabled routes.",
+		}, labels).With(labelsAndValues...),
+		Redundancy: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "redundancy",
+			Help:      "Redundancy level.",
 		}, labels).With(labelsAndValues...),
 	}
 }
@@ -91,14 +115,18 @@ func NopMetrics() *Metrics {
 	return &Metrics{
 		Size:                      discard.NewGauge(),
 		SizeBytes:                 discard.NewGauge(),
+		LaneSize:                  discard.NewGauge(),
+		LaneBytes:                 discard.NewGauge(),
+		TxLifeSpan:                discard.NewHistogram(),
 		TxSizeBytes:               discard.NewHistogram(),
 		FailedTxs:                 discard.NewCounter(),
 		RejectedTxs:               discard.NewCounter(),
 		EvictedTxs:                discard.NewCounter(),
 		RecheckTimes:              discard.NewCounter(),
-		ActiveOutboundConnections: discard.NewGauge(),
 		AlreadyReceivedTxs:        discard.NewCounter(),
-		BatchSize:                 discard.NewHistogram(),
-		ReapedTxs:                 discard.NewCounter(),
+		ActiveOutboundConnections: discard.NewGauge(),
+		RecheckDurationSeconds:    discard.NewGauge(),
+		DisabledRoutes:            discard.NewGauge(),
+		Redundancy:                discard.NewGauge(),
 	}
 }

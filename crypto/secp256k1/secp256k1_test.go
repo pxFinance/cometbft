@@ -28,6 +28,17 @@ var secpDataTable = []keyData{
 	},
 }
 
+func TestPrivKey_Size(t *testing.T) {
+	privKey := secp256k1.GenPrivKey()
+	assert.Equal(t, secp256k1.PrivKeySize, len(privKey.Bytes()))
+}
+
+func TestPubKey_Size(t *testing.T) {
+	privKey := secp256k1.GenPrivKey()
+	pubKey := privKey.PubKey()
+	assert.Equal(t, secp256k1.PubKeySize, len(pubKey.Bytes()))
+}
+
 func TestPubKeySecp256k1Address(t *testing.T) {
 	for _, d := range secpDataTable {
 		privB, _ := hex.DecodeString(d.priv)
@@ -53,7 +64,7 @@ func TestSignAndValidateSecp256k1(t *testing.T) {
 
 	msg := crypto.CRandBytes(128)
 	sig, err := privKey.Sign(msg)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	assert.True(t, pubKey.VerifySignature(msg, sig))
 
@@ -86,7 +97,7 @@ func TestSecp256k1LoadPrivkeyAndSerializeIsIdentity(t *testing.T) {
 
 func TestGenPrivKeySecp256k1(t *testing.T) {
 	// curve order N
-	N := underlyingsecp256k1.Params().N
+	n := underlyingsecp256k1.S256().N
 	tests := []struct {
 		name   string
 		secret []byte
@@ -102,14 +113,13 @@ func TestGenPrivKeySecp256k1(t *testing.T) {
 		{"another seed used in cosmos tests #3", []byte("")},
 	}
 	for _, tt := range tests {
-
 		t.Run(tt.name, func(t *testing.T) {
 			gotPrivKey := secp256k1.GenPrivKeySecp256k1(tt.secret)
 			require.NotNil(t, gotPrivKey)
 			// interpret as a big.Int and make sure it is a valid field element:
 			fe := new(big.Int).SetBytes(gotPrivKey[:])
-			require.True(t, fe.Cmp(N) < 0)
-			require.True(t, fe.Sign() > 0)
+			require.Less(t, fe.Cmp(n), 0)
+			require.Greater(t, fe.Sign(), 0)
 		})
 	}
 }

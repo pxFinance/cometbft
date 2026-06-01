@@ -20,7 +20,7 @@ func decode(bz []byte, v any) error {
 	}
 
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Pointer {
+	if rv.Kind() != reflect.Ptr {
 		return errors.New("must decode into a pointer")
 	}
 	rv = rv.Elem()
@@ -48,7 +48,7 @@ func decodeReflect(bz []byte, rv reflect.Value) error {
 	}
 
 	// Dereference-and-construct pointers, to handle nested pointers.
-	for rv.Kind() == reflect.Pointer {
+	for rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
 			rv.Set(reflect.New(rv.Type().Elem()))
 		}
@@ -65,7 +65,7 @@ func decodeReflect(bz []byte, rv reflect.Value) error {
 		}
 	}
 
-	// If value implements json.Unmarshaler, call it.
+	// If value implements json.Umarshaler, call it.
 	if rv.Addr().Type().Implements(jsonUnmarshalerType) {
 		return rv.Addr().Interface().(json.Unmarshaler).UnmarshalJSON(bz)
 	}
@@ -115,7 +115,6 @@ func decodeReflectList(bz []byte, rv reflect.Value) error {
 				return fmt.Errorf("got %v bytes, expected %v", len(buf), rv.Len())
 			}
 			reflect.Copy(rv, reflect.ValueOf(buf))
-
 		} else if err := decodeStdlib(bz, rv); err != nil {
 			return err
 		}
@@ -219,7 +218,7 @@ func decodeReflectInterface(bz []byte, rv reflect.Value) error {
 	}
 
 	// Dereference-and-construct pointers, to handle nested pointers.
-	for rv.Kind() == reflect.Pointer {
+	for rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
 			rv.Set(reflect.New(rv.Type().Elem()))
 		}
@@ -256,13 +255,13 @@ func decodeReflectInterface(bz []byte, rv reflect.Value) error {
 }
 
 func decodeStdlib(bz []byte, rv reflect.Value) error {
-	if !rv.CanAddr() && rv.Kind() != reflect.Pointer {
+	if !rv.CanAddr() && rv.Kind() != reflect.Ptr {
 		return errors.New("value must be addressable or pointer")
 	}
 
 	// Make sure we are unmarshaling into a pointer.
 	target := rv
-	if rv.Kind() != reflect.Pointer {
+	if rv.Kind() != reflect.Ptr {
 		target = reflect.New(rv.Type())
 	}
 	if err := json.Unmarshal(bz, target.Interface()); err != nil {

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -15,38 +14,88 @@ import (
 	"github.com/lib/pq"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	"github.com/cometbft/cometbft/internal/rand"
 	"github.com/cometbft/cometbft/libs/pubsub/query"
 	"github.com/cometbft/cometbft/types"
 )
 
 const (
-	tableBlocks     = "blocks"
-	tableTxResults  = "tx_results"
-	tableEvents     = "events"
-	tableAttributes = "attributes"
-	driverName      = "postgres"
+	defaultTableBlocks     = "blocks"
+	defaultTableTxResults  = "tx_results"
+	defaultTableEvents     = "events"
+	defaultTableAttributes = "attributes"
+	driverName             = "postgres"
 )
 
 // EventSink is an indexer backend providing the tx/block index services.  This
 // implementation stores records in a PostgreSQL database using the schema
 // defined in state/indexer/sink/psql/schema.sql.
 type EventSink struct {
-	store   *sql.DB
-	chainID string
+	store           *sql.DB
+	chainID         string
+	tableBlocks     string
+	tableTxResults  string
+	tableEvents     string
+	tableAttributes string
 }
+
+type EventSinkOption func(*EventSink)
 
 // NewEventSink constructs an event sink associated with the PostgreSQL
 // database specified by connStr. Events written to the sink are attributed to
 // the specified chainID.
-func NewEventSink(connStr, chainID string) (*EventSink, error) {
-	db, err := sql.Open(driverName, connStr)
-	if err != nil {
-		return nil, err
+func NewEventSink(connStr, chainID string, opts ...EventSinkOption) (*EventSink, error) {
+	es := &EventSink{
+		chainID:         chainID,
+		tableBlocks:     defaultTableBlocks,
+		tableTxResults:  defaultTableTxResults,
+		tableEvents:     defaultTableEvents,
+		tableAttributes: defaultTableAttributes,
 	}
-	return &EventSink{
-		store:   db,
-		chainID: chainID,
-	}, nil
+
+	for _, opt := range opts {
+		opt(es)
+	}
+
+	if es.store == nil && connStr != "" {
+		db, err := sql.Open(driverName, connStr)
+		if err != nil {
+			return nil, err
+		}
+		es.store = db
+	}
+
+	return es, nil
+}
+
+func WithStore(store *sql.DB) EventSinkOption {
+	return func(es *EventSink) {
+		es.store = store
+	}
+}
+
+func WithTableBlocks(tableBlocks string) EventSinkOption {
+	return func(es *EventSink) {
+		es.tableBlocks = tableBlocks
+	}
+}
+
+func WithTableTxResults(tableTxResults string) EventSinkOption {
+	return func(es *EventSink) {
+		es.tableTxResults = tableTxResults
+	}
+}
+
+func WithTableEvents(tableEvents string) EventSinkOption {
+	return func(es *EventSink) {
+		es.tableEvents = tableEvents
+	}
+}
+
+func WithTableAttributes(tableAttributes string) EventSinkOption {
+	return func(es *EventSink) {
+		es.tableAttributes = tableAttributes
+	}
 }
 
 // DB returns the underlying Postgres connection used by the sink.
@@ -71,8 +120,6 @@ func runInTransaction(db *sql.DB, query func(*sql.Tx) error) error {
 
 func runBulkInsert(db *sql.DB, tableName string, columns []string, inserts [][]any) error {
 	return runInTransaction(db, func(tx *sql.Tx) error {
-		// TODO: replace pq.CopyIn with explicit COPY ... FROM STDIN (pq.CopyIn is deprecated in lib/pq).
-		//nolint:staticcheck // SA1019
 		stmt, err := tx.Prepare(pq.CopyIn(tableName, columns...))
 		if err != nil {
 			return fmt.Errorf("preparing bulk insert statement: %w", err)
@@ -146,13 +193,14 @@ func (es *EventSink) IndexBlockEvents(h types.EventDataNewBlockEvents) error {
 	// Add the block to the blocks table and report back its row ID for use
 	// in indexing the events for the block.
 	var blockID int64
+	//nolint:execinquery
 	err := es.store.QueryRow(`
-INSERT INTO `+tableBlocks+` (height, chain_id, created_at)
+INSERT INTO `+es.tableBlocks+` (height, chain_id, created_at)
   VALUES ($1, $2, $3)
   ON CONFLICT DO NOTHING
   RETURNING rowid;
 `, h.Height, es.chainID, ts).Scan(&blockID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil // we already saw this block; quietly succeed
 	} else if err != nil {
 		return fmt.Errorf("indexing block header: %w", err)
@@ -162,10 +210,10 @@ INSERT INTO `+tableBlocks+` (height, chain_id, created_at)
 	events := append([]abci.Event{makeIndexedEvent(types.BlockHeightKey, strconv.FormatInt(h.Height, 10))}, h.Events...)
 	// Insert all the block events. Order is important here,
 	eventInserts, attrInserts := bulkInsertEvents(blockID, 0, events)
-	if err := runBulkInsert(es.store, tableEvents, eventInsertColumns, eventInserts); err != nil {
+	if err := runBulkInsert(es.store, es.tableEvents, eventInsertColumns, eventInserts); err != nil {
 		return fmt.Errorf("failed bulk insert of events: %w", err)
 	}
-	if err := runBulkInsert(es.store, tableAttributes, attrInsertColumns, attrInserts); err != nil {
+	if err := runBulkInsert(es.store, es.tableAttributes, attrInsertColumns, attrInserts); err != nil {
 		return fmt.Errorf("failed bulk insert of attributes: %w", err)
 	}
 	return nil
@@ -176,7 +224,7 @@ func (es *EventSink) getBlockIDs(heights []int64) ([]int64, error) {
 	var blockIDs pq.Int64Array
 	if err := es.store.QueryRow(`
 SELECT array_agg((
-	SELECT rowid FROM `+tableBlocks+` WHERE height = txr.height AND chain_id = $1
+	SELECT rowid FROM `+es.tableBlocks+` WHERE height = txr.height AND chain_id = $1
 )) FROM unnest($2::bigint[]) AS txr(height);`,
 		es.chainID, pq.Array(heights)).Scan(&blockIDs); err != nil {
 		return nil, fmt.Errorf("getting block ids for txs from sql: %w", err)
@@ -184,11 +232,11 @@ SELECT array_agg((
 	return blockIDs, nil
 }
 
-func prefetchTxrExistence(db *sql.DB, blockIDs []int64, indexes []uint32) ([]bool, error) {
+func prefetchTxrExistence(db *sql.DB, blockIDs []int64, indexes []uint32, txResultsTable string) ([]bool, error) {
 	var existence []bool
 	if err := db.QueryRow(`
 SELECT array_agg((
-	SELECT EXISTS(SELECT 1 FROM `+tableTxResults+` WHERE block_id = txr.block_id AND index = txr.index)
+	SELECT EXISTS(SELECT 1 FROM `+txResultsTable+` WHERE block_id = txr.block_id AND index = txr.index)
 )) FROM UNNEST($1::bigint[], $2::integer[]) as txr(block_id, index);`,
 		pq.Array(blockIDs), pq.Array(indexes)).Scan((*pq.BoolArray)(&existence)); err != nil {
 		return nil, fmt.Errorf("fetching already indexed txrs: %w", err)
@@ -210,7 +258,7 @@ func (es *EventSink) IndexTxEvents(txrs []*abci.TxResult) error {
 	if err != nil {
 		return fmt.Errorf("getting block ids for txs: %w", err)
 	}
-	alreadyIndexed, err := prefetchTxrExistence(es.store, blockIDs, indexes)
+	alreadyIndexed, err := prefetchTxrExistence(es.store, blockIDs, indexes, es.tableTxResults)
 	if err != nil {
 		return fmt.Errorf("failed to prefetch which txrs were already indexed: %w", err)
 	}
@@ -240,35 +288,35 @@ func (es *EventSink) IndexTxEvents(txrs []*abci.TxResult) error {
 		eventInserts = append(eventInserts, newEventInserts...)
 		attrInserts = append(attrInserts, newAttrInserts...)
 	}
-	if err := runBulkInsert(es.store, tableTxResults, txrInsertColumns, txrInserts); err != nil {
+	if err := runBulkInsert(es.store, es.tableTxResults, txrInsertColumns, txrInserts); err != nil {
 		return fmt.Errorf("bulk inserting txrs: %w", err)
 	}
-	if err := runBulkInsert(es.store, tableEvents, eventInsertColumns, eventInserts); err != nil {
+	if err := runBulkInsert(es.store, es.tableEvents, eventInsertColumns, eventInserts); err != nil {
 		return fmt.Errorf("bulk inserting events: %w", err)
 	}
-	if err := runBulkInsert(es.store, tableAttributes, attrInsertColumns, attrInserts); err != nil {
+	if err := runBulkInsert(es.store, es.tableAttributes, attrInsertColumns, attrInserts); err != nil {
 		return fmt.Errorf("bulk inserting attributes: %w", err)
 	}
 	return nil
 }
 
 // SearchBlockEvents is not implemented by this sink, and reports an error for all queries.
-func (es *EventSink) SearchBlockEvents(_ context.Context, _ *query.Query) ([]int64, error) {
+func (*EventSink) SearchBlockEvents(_ context.Context, _ *query.Query) ([]int64, error) {
 	return nil, errors.New("block search is not supported via the postgres event sink")
 }
 
 // SearchTxEvents is not implemented by this sink, and reports an error for all queries.
-func (es *EventSink) SearchTxEvents(_ context.Context, _ *query.Query) ([]*abci.TxResult, error) {
+func (*EventSink) SearchTxEvents(_ context.Context, _ *query.Query) ([]*abci.TxResult, error) {
 	return nil, errors.New("tx search is not supported via the postgres event sink")
 }
 
 // GetTxByHash is not implemented by this sink, and reports an error for all queries.
-func (es *EventSink) GetTxByHash(_ []byte) (*abci.TxResult, error) {
+func (*EventSink) GetTxByHash(_ []byte) (*abci.TxResult, error) {
 	return nil, errors.New("getTxByHash is not supported via the postgres event sink")
 }
 
 // HasBlock is not implemented by this sink, and reports an error for all queries.
-func (es *EventSink) HasBlock(_ int64) (bool, error) {
+func (*EventSink) HasBlock(_ int64) (bool, error) {
 	return false, errors.New("hasBlock is not supported via the postgres event sink")
 }
 

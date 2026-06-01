@@ -11,8 +11,8 @@ import (
 	"runtime"
 
 	"github.com/cometbft/cometbft/abci/types"
+	cmtnet "github.com/cometbft/cometbft/internal/net"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
-	cmtnet "github.com/cometbft/cometbft/libs/net"
 	"github.com/cometbft/cometbft/libs/service"
 	cmtsync "github.com/cometbft/cometbft/libs/sync"
 )
@@ -21,7 +21,7 @@ import (
 // for out-of-process go applications. Note, in the case of an application written in golang,
 // the developer may also run both Tendermint and the application within the same process.
 //
-// The socket server deliver
+// The socket server deliver.
 type SocketServer struct {
 	service.BaseService
 	isLoggerSet bool
@@ -97,7 +97,7 @@ func (s *SocketServer) addConn(conn net.Conn) int {
 	return connID
 }
 
-// deletes conn even if close errs
+// deletes conn even if close errs.
 func (s *SocketServer) rmConn(connID int) error {
 	s.connsMtx.Lock()
 	defer s.connsMtx.Unlock()
@@ -144,7 +144,7 @@ func (s *SocketServer) acceptConnectionsRoutine() {
 func (s *SocketServer) waitForClose(closeConn chan error, connID int) {
 	err := <-closeConn
 	switch {
-	case err == io.EOF:
+	case errors.Is(err, io.EOF):
 		s.Logger.Error("Connection was closed by client")
 	case err != nil:
 		s.Logger.Error("Connection error", "err", err)
@@ -159,11 +159,10 @@ func (s *SocketServer) waitForClose(closeConn chan error, connID int) {
 	}
 }
 
-// Read requests from conn and deal with them
+// Read requests from conn and deal with them.
 func (s *SocketServer) handleRequests(closeConn chan error, conn io.Reader, responses chan<- *types.Response) {
+	var count int
 	bufReader := bufio.NewReader(conn)
-
-	locked := false // true only while appMtx is held inside the loop
 
 	defer func() {
 		// make sure to recover from any app-related panics to allow proper socket cleanup.
@@ -179,18 +178,15 @@ func (s *SocketServer) handleRequests(closeConn chan error, conn io.Reader, resp
 				fmt.Fprintln(os.Stderr, err)
 			}
 			closeConn <- err
-		}
-		if locked {
 			s.appMtx.Unlock()
 		}
 	}()
 
 	for {
-
 		req := &types.Request{}
 		err := types.ReadMessage(bufReader, req)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				closeConn <- err
 			} else {
 				closeConn <- fmt.Errorf("error reading message: %w", err)
@@ -198,119 +194,119 @@ func (s *SocketServer) handleRequests(closeConn chan error, conn io.Reader, resp
 			return
 		}
 		s.appMtx.Lock()
-		locked = true
+		count++
 		resp, err := s.handleRequest(context.TODO(), req)
 		if err != nil {
 			// any error either from the application or because of an unknown request
 			// throws an exception back to the client. This will stop the server and
 			// should also halt the client.
-			responses <- types.ToResponseException(err.Error())
+			responses <- types.ToExceptionResponse(err.Error())
 		} else {
 			responses <- resp
 		}
 		s.appMtx.Unlock()
-		locked = false
 	}
 }
 
-// handleRequests takes a request and calls the application passing the returned
+// handleRequests takes a request and calls the application passing the returned.
 func (s *SocketServer) handleRequest(ctx context.Context, req *types.Request) (*types.Response, error) {
 	switch r := req.Value.(type) {
 	case *types.Request_Echo:
-		return types.ToResponseEcho(r.Echo.Message), nil
+		return types.ToEchoResponse(r.Echo.Message), nil
 	case *types.Request_Flush:
-		return types.ToResponseFlush(), nil
+		return types.ToFlushResponse(), nil
 	case *types.Request_Info:
 		res, err := s.app.Info(ctx, r.Info)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseInfo(res), nil
+		return types.ToInfoResponse(res), nil
 	case *types.Request_CheckTx:
 		res, err := s.app.CheckTx(ctx, r.CheckTx)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseCheckTx(res), nil
+		return types.ToCheckTxResponse(res), nil
 	case *types.Request_Commit:
 		res, err := s.app.Commit(ctx, r.Commit)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseCommit(res), nil
+		return types.ToCommitResponse(res), nil
 	case *types.Request_Query:
 		res, err := s.app.Query(ctx, r.Query)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseQuery(res), nil
+		return types.ToQueryResponse(res), nil
 	case *types.Request_InitChain:
 		res, err := s.app.InitChain(ctx, r.InitChain)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseInitChain(res), nil
+		return types.ToInitChainResponse(res), nil
 	case *types.Request_FinalizeBlock:
 		res, err := s.app.FinalizeBlock(ctx, r.FinalizeBlock)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseFinalizeBlock(res), nil
+		return types.ToFinalizeBlockResponse(res), nil
 	case *types.Request_ListSnapshots:
 		res, err := s.app.ListSnapshots(ctx, r.ListSnapshots)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseListSnapshots(res), nil
+		return types.ToListSnapshotsResponse(res), nil
 	case *types.Request_OfferSnapshot:
 		res, err := s.app.OfferSnapshot(ctx, r.OfferSnapshot)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseOfferSnapshot(res), nil
+		return types.ToOfferSnapshotResponse(res), nil
 	case *types.Request_PrepareProposal:
 		res, err := s.app.PrepareProposal(ctx, r.PrepareProposal)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponsePrepareProposal(res), nil
+		return types.ToPrepareProposalResponse(res), nil
 	case *types.Request_ProcessProposal:
 		res, err := s.app.ProcessProposal(ctx, r.ProcessProposal)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseProcessProposal(res), nil
+		return types.ToProcessProposalResponse(res), nil
 	case *types.Request_LoadSnapshotChunk:
 		res, err := s.app.LoadSnapshotChunk(ctx, r.LoadSnapshotChunk)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseLoadSnapshotChunk(res), nil
+		return types.ToLoadSnapshotChunkResponse(res), nil
 	case *types.Request_ApplySnapshotChunk:
 		res, err := s.app.ApplySnapshotChunk(ctx, r.ApplySnapshotChunk)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseApplySnapshotChunk(res), nil
+		return types.ToApplySnapshotChunkResponse(res), nil
 	case *types.Request_ExtendVote:
 		res, err := s.app.ExtendVote(ctx, r.ExtendVote)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseExtendVote(res), nil
+		return types.ToExtendVoteResponse(res), nil
 	case *types.Request_VerifyVoteExtension:
 		res, err := s.app.VerifyVoteExtension(ctx, r.VerifyVoteExtension)
 		if err != nil {
 			return nil, err
 		}
-		return types.ToResponseVerifyVoteExtension(res), nil
+		return types.ToVerifyVoteExtensionResponse(res), nil
 	default:
 		return nil, ErrUnknownRequest{Request: *req}
 	}
 }
 
 // Pull responses from 'responses' and write them to conn.
-func (s *SocketServer) handleResponses(closeConn chan error, conn io.Writer, responses <-chan *types.Response) {
+func (*SocketServer) handleResponses(closeConn chan error, conn io.Writer, responses <-chan *types.Response) {
+	var count int
 	bufWriter := bufio.NewWriter(conn)
 	for {
 		res := <-responses
@@ -333,5 +329,6 @@ func (s *SocketServer) handleResponses(closeConn chan error, conn io.Writer, res
 		if e, ok := res.Value.(*types.Response_Exception); ok {
 			closeConn <- errors.New(e.Exception.Error)
 		}
+		count++
 	}
 }

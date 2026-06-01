@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	ssproto "github.com/cometbft/cometbft/api/cometbft/statesync/v1"
 	"github.com/cometbft/cometbft/config"
 	"github.com/cometbft/cometbft/p2p"
 	p2pmocks "github.com/cometbft/cometbft/p2p/mocks"
-	ssproto "github.com/cometbft/cometbft/proto/tendermint/statesync"
 	proxymocks "github.com/cometbft/cometbft/proxy/mocks"
 )
 
@@ -41,15 +41,14 @@ func TestReactor_Receive_ChunkRequest(t *testing.T) {
 	}
 
 	for name, tc := range testcases {
-
 		t.Run(name, func(t *testing.T) {
 			// Mock ABCI connection to return local snapshots
 			conn := &proxymocks.AppConnSnapshot{}
-			conn.On("LoadSnapshotChunk", mock.Anything, &abci.RequestLoadSnapshotChunk{
+			conn.On("LoadSnapshotChunk", mock.Anything, &abci.LoadSnapshotChunkRequest{
 				Height: tc.request.Height,
 				Format: tc.request.Format,
 				Chunk:  tc.request.Index,
-			}).Return(&abci.ResponseLoadSnapshotChunk{Chunk: tc.chunk}, nil)
+			}).Return(&abci.LoadSnapshotChunkResponse{Chunk: tc.chunk}, nil)
 
 			// Mock peer to store response, if found
 			peer := &p2pmocks.Peer{}
@@ -73,7 +72,7 @@ func TestReactor_Receive_ChunkRequest(t *testing.T) {
 
 			// Start a reactor and send a ssproto.ChunkRequest, then wait for and check response
 			cfg := config.DefaultStateSyncConfig()
-			r := NewReactor(*cfg, conn, nil, NopMetrics())
+			r := NewReactor(*cfg, conn, nil, NopMetrics(), nil)
 			err := r.Start()
 			require.NoError(t, err)
 			t.Cleanup(func() {
@@ -133,11 +132,10 @@ func TestReactor_Receive_SnapshotsRequest(t *testing.T) {
 	}
 
 	for name, tc := range testcases {
-
 		t.Run(name, func(t *testing.T) {
 			// Mock ABCI connection to return local snapshots
 			conn := &proxymocks.AppConnSnapshot{}
-			conn.On("ListSnapshots", mock.Anything, &abci.RequestListSnapshots{}).Return(&abci.ResponseListSnapshots{
+			conn.On("ListSnapshots", mock.Anything, &abci.ListSnapshotsRequest{}).Return(&abci.ListSnapshotsResponse{
 				Snapshots: tc.snapshots,
 			}, nil)
 
@@ -163,7 +161,7 @@ func TestReactor_Receive_SnapshotsRequest(t *testing.T) {
 
 			// Start a reactor and send a SnapshotsRequestMessage, then wait for and check responses
 			cfg := config.DefaultStateSyncConfig()
-			r := NewReactor(*cfg, conn, nil, NopMetrics())
+			r := NewReactor(*cfg, conn, nil, NopMetrics(), nil)
 			err := r.Start()
 			require.NoError(t, err)
 			t.Cleanup(func() {

@@ -10,13 +10,14 @@ import (
 	gogotypes "github.com/cosmos/gogoproto/types"
 	"github.com/oasisprotocol/curve25519-voi/primitives/merlin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/chacha20poly1305"
 
+	tmp2p "github.com/cometbft/cometbft/api/cometbft/p2p/v1"
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	cryptoenc "github.com/cometbft/cometbft/crypto/encoding"
 	"github.com/cometbft/cometbft/libs/protoio"
-	tmp2p "github.com/cometbft/cometbft/proto/tendermint/p2p"
 )
 
 type buffer struct {
@@ -35,7 +36,7 @@ func (b *buffer) Bytes() []byte {
 	return b.next.Bytes()
 }
 
-func (b *buffer) Close() error {
+func (*buffer) Close() error {
 	return nil
 }
 
@@ -177,7 +178,7 @@ func (c *evilConn) Write(data []byte) (n int, err error) {
 	}
 }
 
-func (c *evilConn) Close() error {
+func (*evilConn) Close() error {
 	return nil
 }
 
@@ -258,6 +259,8 @@ func TestMakeSecretConnection(t *testing.T) {
 		{"share bad ethimeral key", newEvilConn(true, true, false, false), "wrong wireType"},
 		{"refuse to share auth signature", newEvilConn(true, false, false, false), "EOF"},
 		{"share bad auth signature", newEvilConn(true, false, true, true), "failed to decrypt SecretConnection"},
+		// fails with the introduction of changes PR #3419
+		// {"all good", newEvilConn(true, false, true, false), ""},
 	}
 
 	for _, tc := range testCases {
@@ -265,11 +268,11 @@ func TestMakeSecretConnection(t *testing.T) {
 			privKey := ed25519.GenPrivKey()
 			_, err := MakeSecretConnection(tc.conn, privKey)
 			if tc.errMsg != "" {
-				if assert.Error(t, err) {
+				if assert.Error(t, err) { //nolint:testifylint // require.Error doesn't work with the conditional here
 					assert.Contains(t, err.Error(), tc.errMsg)
 				}
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}

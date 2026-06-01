@@ -10,10 +10,10 @@ import (
 	"sort"
 	"strings"
 
+	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/cometbft/cometbft/crypto/tmhash"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
-	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 )
 
 const (
@@ -40,7 +40,7 @@ var ErrTotalVotingPowerOverflow = fmt.Errorf("total voting power of resulting va
 // ErrProposerNotInVals is returned if the proposer is not in the validator set.
 var ErrProposerNotInVals = errors.New("proposer not in validator set")
 
-// ValidatorSet represents a set of *Validator at a given height.
+// ValidatorSet represent a set of *Validator at a given height.
 //
 // The validators can be fetched by address or index.
 // The index is in order of .VotingPower, so the indices are fixed for all
@@ -403,12 +403,12 @@ func (vals *ValidatorSet) ProposerPriorityHash() []byte {
 	}
 
 	buf := make([]byte, binary.MaxVarintLen64*len(vals.Validators))
-	offset := 0
+	total := 0
 	for _, val := range vals.Validators {
-		n := binary.PutVarint(buf[offset:], val.ProposerPriority)
-		offset += n
+		n := binary.PutVarint(buf, val.ProposerPriority)
+		total += n
 	}
-	return tmhash.Sum(buf[:offset])
+	return tmhash.Sum(buf[:total])
 }
 
 // Iterate will run the given function over the set.
@@ -483,7 +483,7 @@ func processChanges(origChanges []*Validator) (updates, removals []*Validator, e
 //	Note that this will be < 2 * MaxTotalVotingPower in case high power validators are removed and
 //	validators are added/ updated with high power values.
 //
-// err - non-nil if the maximum allowed total voting power would be exceeded
+// err - non-nil if the maximum allowed total voting power would be exceeded.
 func verifyUpdates(
 	updates []*Validator,
 	vals *ValidatorSet,
@@ -724,53 +724,11 @@ func (vals *ValidatorSet) UpdateWithChangeSet(changes []*Validator) error {
 }
 
 // VerifyCommit verifies +2/3 of the set had signed the given commit and all
-// other signatures are valid
+// other signatures are valid.
 func (vals *ValidatorSet) VerifyCommit(chainID string, blockID BlockID,
 	height int64, commit *Commit,
 ) error {
 	return VerifyCommit(chainID, vals, blockID, height, commit)
-}
-
-// VerifyCommitExtended similar to VerifyCommit but for extended commits.
-// extCommit must already be validated by ValidateBasic.
-func (vals *ValidatorSet) VerifyCommitExtended(
-	chainID string,
-	blockID BlockID,
-	height int64,
-	extCommit *ExtendedCommit,
-) error {
-	if extCommit == nil {
-		return errors.New("nil extended commit")
-	}
-
-	// 1. ensure vote extensions
-	err := extCommit.EnsureExtensions(true)
-	if err != nil {
-		return err
-	}
-
-	// 2. verify regular commit
-	err = vals.VerifyCommit(chainID, blockID, height, extCommit.ToCommit())
-	if err != nil {
-		return err
-	}
-
-	// 3. check signatures
-	for idx := range extCommit.ExtendedSignatures {
-		_, val := vals.GetByIndex(int32(idx))
-
-		// should not happen as we verified the commit above
-		if val == nil {
-			return fmt.Errorf("unable to find val #%d out of %d vals", idx, vals.Size())
-		}
-
-		vote := extCommit.GetExtendedVote(int32(idx))
-		if err := vote.VerifyExtension(chainID, val.PubKey); err != nil {
-			return fmt.Errorf("invalid vote extension signature (val #%d): %w", idx, err)
-		}
-	}
-
-	return nil
 }
 
 // LIGHT CLIENT VERIFICATION METHODS
@@ -783,20 +741,7 @@ func (vals *ValidatorSet) VerifyCommitLight(chainID string, blockID BlockID,
 	return VerifyCommitLight(chainID, vals, blockID, height, commit)
 }
 
-// VerifyCommitLightWithCache verifies +2/3 of the set had signed the given commit.
-// It does NOT count all signatures.
-//
-// The cache provided will be used to skip signature verification for entries where the
-// key (signature), validator pubkey, and vote sign bytes all match.
-// Additionally, any verified signatures will be added to the cache.
-func (vals *ValidatorSet) VerifyCommitLightWithCache(chainID string, blockID BlockID,
-	height int64, commit *Commit,
-	verifiedSignatureCache *SignatureCache,
-) error {
-	return VerifyCommitLightWithCache(chainID, vals, blockID, height, commit, verifiedSignatureCache)
-}
-
-// VerifyCommitLightAllSignatures verifies +2/3 of the set had signed the given commit.
+// VerifyCommitLight verifies +2/3 of the set had signed the given commit.
 // It DOES count all signatures.
 func (vals *ValidatorSet) VerifyCommitLightAllSignatures(chainID string, blockID BlockID,
 	height int64, commit *Commit,
@@ -813,23 +758,6 @@ func (vals *ValidatorSet) VerifyCommitLightTrusting(
 	trustLevel cmtmath.Fraction,
 ) error {
 	return VerifyCommitLightTrusting(chainID, vals, commit, trustLevel)
-}
-
-// VerifyCommitLightTrustingAllSignatures verifies that trustLevel of the validator set signed
-// this commit.
-// It does NOT count all signatures.
-// CONTRACT: must run ValidateBasic() on commit before verifying.
-//
-// The cache provided will be used to skip signature verification for entries where the
-// key (signature), validator pubkey, and vote sign bytes all match.
-// Additionally, any verified signatures will be added to the cache.
-func (vals *ValidatorSet) VerifyCommitLightTrustingWithCache(
-	chainID string,
-	commit *Commit,
-	trustLevel cmtmath.Fraction,
-	verifiedSignatureCache *SignatureCache,
-) error {
-	return VerifyCommitLightTrustingWithCache(chainID, vals, commit, trustLevel, verifiedSignatureCache)
 }
 
 // VerifyCommitLightTrusting verifies that trustLevel of the validator set signed
@@ -910,7 +838,7 @@ func (e ErrNotEnoughVotingPowerSigned) Error() string {
 	return fmt.Sprintf("invalid commit -- insufficient voting power: got %d, needed more than %d", e.Got, e.Needed)
 }
 
-//----------------
+// ----------------
 
 // String returns a string representation of ValidatorSet.
 //
@@ -927,7 +855,7 @@ func (vals *ValidatorSet) StringIndented(indent string) string {
 		return "nil-ValidatorSet"
 	}
 	var valStrings []string
-	vals.Iterate(func(index int, val *Validator) bool {
+	vals.Iterate(func(_ int, val *Validator) bool {
 		valStrings = append(valStrings, val.String())
 		return false
 	})
@@ -942,7 +870,7 @@ func (vals *ValidatorSet) StringIndented(indent string) string {
 		indent)
 }
 
-//-------------------------------------
+// -------------------------------------
 
 // ValidatorsByVotingPower implements sort.Interface for []*Validator based on
 // the VotingPower and Address fields.
@@ -975,7 +903,7 @@ func (valz ValidatorsByAddress) Swap(i, j int) {
 	valz[i], valz[j] = valz[j], valz[i]
 }
 
-// ToProto converts ValidatorSet to protobuf
+// ToProto converts ValidatorSet to protobuf.
 func (vals *ValidatorSet) ToProto() (*cmtproto.ValidatorSet, error) {
 	if vals.IsNilOrEmpty() {
 		return &cmtproto.ValidatorSet{}, nil // validator set should never be nil
@@ -1007,7 +935,7 @@ func (vals *ValidatorSet) ToProto() (*cmtproto.ValidatorSet, error) {
 
 // ValidatorSetFromProto sets a protobuf ValidatorSet to the given pointer.
 // It returns an error if any of the validators from the set or the proposer
-// is invalid
+// is invalid.
 func ValidatorSetFromProto(vp *cmtproto.ValidatorSet) (*ValidatorSet, error) {
 	if vp == nil {
 		return nil, errors.New("nil validator set") // validator set should never be nil, bigger issues are at play if empty
@@ -1072,7 +1000,7 @@ func ValidatorSetFromExistingValidators(valz []*Validator) (*ValidatorSet, error
 	return vals, nil
 }
 
-//----------------------------------------
+// ----------------------------------------
 
 // RandValidatorSet returns a randomized validator set (size: +numValidators+),
 // where each validator has a voting power of +votingPower+.

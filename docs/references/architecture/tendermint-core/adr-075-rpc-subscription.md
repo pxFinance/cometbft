@@ -308,7 +308,7 @@ type EventParams struct {
     MaxResults int `json:"max_results"`
 
     // Return only items after this cursor. If empty, the limit is just
-    // before the beginning of the event log.
+    // before the the beginning of the event log.
     After string `json:"after"`
 
     // Return only items before this cursor.  If empty, the limit is just
@@ -458,7 +458,7 @@ crashes and connectivity issues:
      no `before`).
 
   2. If there are more events than the client requested, or if the client needs
-     to read older events to recover from a stall or crash, clients will
+     to to read older events to recover from a stall or crash, clients will
      **page** backward through the event log (by setting `before` and `after`).
 
 - While the new API requires explicit polling by the client, it makes better
@@ -550,7 +550,7 @@ the new API, to remove a disincentive to upgrading.
 > disruption for users in the v0.36 cycle, I have decided not to do this for
 > the first phase.
 >
-> If we wind up pushing this design into v0.37, however, we should re-evaluate
+> If we wind up pushing this design into v0.37, however, we should re-evaulate
 > this partial turn-down of the websocket.
 
 ### Future Work

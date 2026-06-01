@@ -8,18 +8,18 @@ import (
 
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
+	cmtos "github.com/cometbft/cometbft/internal/os"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
-	cmtos "github.com/cometbft/cometbft/libs/os"
 )
 
-// ID is a hex-encoded crypto.Address
+// ID is a hex-encoded crypto.Address.
 type ID string
 
 // IDByteLength is the length of a crypto.Address. Currently only 20.
 // TODO: support other length addresses ?
 const IDByteLength = crypto.AddressSize
 
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Persistent peer ID
 // TODO: encrypt on disk
 
@@ -34,7 +34,7 @@ func (nodeKey *NodeKey) ID() ID {
 	return PubKeyToID(nodeKey.PubKey())
 }
 
-// PubKey returns the peer's PubKey
+// PubKey returns the peer's PubKey.
 func (nodeKey *NodeKey) PubKey() crypto.PubKey {
 	return nodeKey.PrivKey.PubKey()
 }
@@ -95,7 +95,7 @@ func (nodeKey *NodeKey) SaveAs(filePath string) error {
 	return nil
 }
 
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 
 // MakePoWTarget returns the big-endian encoding of 2^(targetBits - difficulty) - 1.
 // It can be used as a Proof of Work target.

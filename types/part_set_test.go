@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cometbft/cometbft/crypto/merkle"
-	cmtrand "github.com/cometbft/cometbft/libs/rand"
+	cmtrand "github.com/cometbft/cometbft/internal/rand"
 )
 
 const (
@@ -45,11 +45,11 @@ func TestBasicPartSet(t *testing.T) {
 	// adding part with invalid index
 	added, err := partSet2.AddPart(&Part{Index: 10000})
 	assert.False(t, added)
-	assert.Error(t, err)
+	require.Error(t, err)
 	// adding existing part
 	added, err = partSet2.AddPart(partSet2.GetPart(0))
 	assert.False(t, added)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, partSet.Hash(), partSet2.Hash())
 	assert.EqualValues(t, nParts, partSet2.Total())
@@ -111,7 +111,7 @@ func TestPartSetHeaderValidateBasic(t *testing.T) {
 		malleatePartSetHeader func(*PartSetHeader)
 		expectErr             bool
 	}{
-		{"Good PartSet", func(psHeader *PartSetHeader) {}, false},
+		{"Good PartSet", func(_ *PartSetHeader) {}, false},
 		{"Invalid Hash", func(psHeader *PartSetHeader) { psHeader.Hash = make([]byte, 1) }, true},
 	}
 	for _, tc := range testCases {
@@ -131,7 +131,7 @@ func TestPart_ValidateBasic(t *testing.T) {
 		malleatePart func(*Part)
 		expectErr    bool
 	}{
-		{"Good Part", func(pt *Part) {}, false},
+		{"Good Part", func(_ *Part) {}, false},
 		{"Too big part", func(pt *Part) { pt.Bytes = make([]byte, BlockPartSizeBytes+1) }, true},
 		{"Good small last part", func(pt *Part) {
 			pt.Index = 1

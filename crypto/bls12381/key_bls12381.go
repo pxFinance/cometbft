@@ -3,9 +3,7 @@
 package bls12381
 
 import (
-	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 
@@ -63,17 +61,6 @@ type PrivKey struct {
 	sk *blst.SecretKey
 }
 
-// GenPrivKeyFromSecret generates a new random key using `secret` for the seed
-func GenPrivKeyFromSecret(secret []byte) (*PrivKey, error) {
-	if len(secret) != 32 {
-		seed := sha256.Sum256(secret) // We need 32 bytes
-		secret = seed[:]
-	}
-
-	sk := blst.KeyGen(secret)
-	return &PrivKey{sk: sk}, nil
-}
-
 // NewPrivateKeyFromBytes build a new key from the given bytes.
 func NewPrivateKeyFromBytes(bz []byte) (*PrivKey, error) {
 	sk := new(blst.SecretKey).Deserialize(bz)
@@ -90,7 +77,8 @@ func GenPrivKey() (*PrivKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	return GenPrivKeyFromSecret(ikm[:])
+	sk := blst.KeyGen(ikm[:])
+	return &PrivKey{sk: sk}, nil
 }
 
 // Bytes returns the byte representation of the Key.
@@ -101,12 +89,7 @@ func (privKey PrivKey) Bytes() []byte {
 // PubKey returns the private key's public key. If the privkey is not valid
 // it returns a nil value.
 func (privKey PrivKey) PubKey() crypto.PubKey {
-	return PubKey{pk: new(blstPublicKey).From(privKey.sk)}
-}
-
-// Equals returns true if two keys are equal and false otherwise.
-func (privKey PrivKey) Equals(other crypto.PrivKey) bool {
-	return privKey.Type() == other.Type() && bytes.Equal(privKey.Bytes(), other.Bytes())
+	return &PubKey{pk: new(blstPublicKey).From(privKey.sk)}
 }
 
 // Type returns the type.
@@ -205,11 +188,6 @@ func (pubKey PubKey) Bytes() []byte {
 // Type returns the key's type.
 func (PubKey) Type() string {
 	return KeyType
-}
-
-// Equals returns true if the other's type is the same and their bytes are deeply equal.
-func (pubKey PubKey) Equals(other crypto.PubKey) bool {
-	return pubKey.Type() == other.Type() && bytes.Equal(pubKey.Bytes(), other.Bytes())
 }
 
 // MarshalJSON marshals the public key to JSON.

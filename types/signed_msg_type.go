@@ -1,37 +1,37 @@
 package types
 
-import cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+import cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 
-// Short lowercase descriptors for SignedMsgType values; exported so tests and
-// callers can reuse them.
+type SignedMsgType = cmtproto.SignedMsgType
+
 const (
-	UnknownShortName   = "unknown"
-	PrevoteShortName   = "prevote"
-	PrecommitShortName = "precommit"
-	ProposalShortName  = "proposal"
+	UnknownType   SignedMsgType = cmtproto.UnknownType
+	PrevoteType   SignedMsgType = cmtproto.PrevoteType
+	PrecommitType SignedMsgType = cmtproto.PrecommitType
+	ProposalType  SignedMsgType = cmtproto.ProposalType
 )
 
 // IsVoteTypeValid returns true if t is a valid vote type.
-func IsVoteTypeValid(t cmtproto.SignedMsgType) bool {
+func IsVoteTypeValid(t SignedMsgType) bool {
 	switch t {
-	case cmtproto.PrevoteType, cmtproto.PrecommitType:
+	case PrevoteType, PrecommitType:
 		return true
 	default:
 		return false
 	}
 }
 
-var signedMsgTypeToShortName = map[cmtproto.SignedMsgType]string{
-	cmtproto.UnknownType:   UnknownShortName,
-	cmtproto.PrevoteType:   PrevoteShortName,
-	cmtproto.PrecommitType: PrecommitShortName,
-	cmtproto.ProposalType:  ProposalShortName,
+var signedMsgTypeToShortName = map[SignedMsgType]string{
+	UnknownType:   "unknown",
+	PrevoteType:   "prevote",
+	PrecommitType: "precommit",
+	ProposalType:  "proposal",
 }
 
 // Returns a short lowercase descriptor for a signed message type.
-func SignedMsgTypeToShortString(t cmtproto.SignedMsgType) string {
+func SignedMsgTypeToShortString(t SignedMsgType) string {
 	if shortName, ok := signedMsgTypeToShortName[t]; ok {
 		return shortName
 	}
-	return UnknownShortName
+	return "unknown"
 }

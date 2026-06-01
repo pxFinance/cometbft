@@ -7,10 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cmtrand "github.com/cometbft/cometbft/libs/rand"
-	"github.com/cometbft/cometbft/libs/test"
-
 	"github.com/cometbft/cometbft/crypto/tmhash"
+	cmtrand "github.com/cometbft/cometbft/internal/rand"
+	"github.com/cometbft/cometbft/libs/test"
 )
 
 type testItem []byte
@@ -35,7 +34,6 @@ func TestHashFromByteSlices(t *testing.T) {
 		},
 	}
 	for name, tc := range testcases {
-
 		t.Run(name, func(t *testing.T) {
 			hash := HashFromByteSlices(tc.slices)
 			assert.Equal(t, tc.expectHash, hex.EncodeToString(hash))
@@ -67,7 +65,7 @@ func TestProof(t *testing.T) {
 		proof := proofs[i]
 
 		// Check total/index
-		require.EqualValues(t, proof.Index, i, "Unmatched indicies: %d vs %d", proof.Index, i)
+		require.EqualValues(t, proof.Index, i, "Unmatched indices: %d vs %d", proof.Index, i)
 
 		require.EqualValues(t, proof.Total, total, "Unmatched totals: %d vs %d", proof.Total, total)
 

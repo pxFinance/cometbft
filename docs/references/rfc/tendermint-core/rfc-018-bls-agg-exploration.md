@@ -102,7 +102,7 @@ BLS signatures have already gained traction within several popular projects.
 Gossip could be updated to aggregate vote signatures during a consensus round.
 This appears to be of frankly little utility. Creating an aggregated signature
 incurs overhead, so frequently re-aggregating may incur a significant
-overhead. How costly this is still subject to further investigation and
+overhead. How costly this is is still subject to further investigation and
 performance testing.
 
 Even if vote signatures were aggregated before gossip, each validator would still
@@ -179,7 +179,7 @@ number of operations used to verify a signature does not grow at all with the
 number of signatures included in the aggregate signature (as long as the signers
 signed over the same message data as is the case in Tendermint).
 
-It is worth noting that this would also represent a _degradation_ in signature
+It is worth noting that this would also represent a _degredation_ in signature
 verification time for chains with small validator sets. When batch verifying
 only 32 signatures, our ed25519 library takes .57 milliseconds, whereas BLS
 would still require the same 1.5 milliseconds.
@@ -232,7 +232,7 @@ instead of the full list of multi-signatures as we have them now.
 Aggregation requires a specific signature algorithm, and our legacy signing schemes
 cannot be aggregated. In practice, this means that aggregated signatures could
 be created for a subset of validators using BLS signatures, and validators
-with other key types (such as Ed25519) would still have to be separately
+with other key types (such as Ed25519) would still have to be be separately
 propagated in blocks and votes.
 
 #### Many HSMs do not support aggregated signatures
@@ -347,7 +347,7 @@ producing a vote signed by both itself and some other validator where the other
 validator did not actually produce the vote itself.
 
 The main mechanisms for preventing this require that each entity prove that it
-can sign data with just their private key. The options involve either
+can can sign data with just their private key. The options involve either
 ensuring that each entity sign a _different_ message when producing every
 signature _or_ producing a [proof of possession][bls-ietf-pop] (PoP) when announcing
 their key to the network.

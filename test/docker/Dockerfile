@@ -1,34 +1,19 @@
-FROM golang:1.25
-
-# Avoid interactive prompts during apt operations
-ENV DEBIAN_FRONTEND=noninteractive
+FROM golang:1.26.2
 
 # Grab deps (jq, hexdump, xxd, killall)
-# - hexdump lives in bsdextrautils on bookworm
-# - xxd is available as its own package (no need for vim-common)
-# - netcat is virtual; pick netcat-openbsd
 RUN apt-get update && \
   apt-get install -y --no-install-recommends \
-    jq \
-    bsdextrautils \
-    xxd \
-    psmisc \
-    netcat-openbsd \
-    curl \
-  && rm -rf /var/lib/apt/lists/*
+  jq bsdmainutils vim-common psmisc netcat-traditional curl
 
 # Setup CometBFT repo
-ENV REPO=$GOPATH/src/github.com/cometbft/cometbft
-ENV GOBIN=$GOPATH/bin
+ENV REPO $GOPATH/src/github.com/cometbft/cometbft
+ENV GOBIN $GOPATH/bin
 WORKDIR $REPO
 
-# (Optional cache boost) copy mod files first for better go mod caching
-# Comment these two lines out if they don't exist in your tree
-COPY go.mod go.sum ./
-RUN go mod download || true
-
 # Copy in the code
+# TODO: rewrite to only copy Makefile & other files?
 COPY . $REPO
+
 
 # install ABCI CLI
 RUN make install_abci

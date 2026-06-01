@@ -15,7 +15,7 @@ var typeRegistry = newTypes()
 // registry. These types will be encoded with a type wrapper `{"type":"<type>","value":<value>}`
 // regardless of which interface they are wrapped in (if any). If the type is a pointer, it will
 // still be valid both for value and pointer types, but decoding into an interface will generate
-// a value or pointer based on the registered type.
+// the a value or pointer based on the registered type.
 //
 // Should only be called in init() functions, as it panics on error.
 func RegisterType(_type any, name string) {
@@ -58,7 +58,7 @@ func (t *types) register(name string, rt reflect.Type) error {
 	// If this is a pointer type, we recursively resolve until we get a bare type, but register that
 	// we should return pointers.
 	returnPtr := false
-	for rt.Kind() == reflect.Pointer {
+	for rt.Kind() == reflect.Ptr {
 		returnPtr = true
 		rt = rt.Elem()
 	}
@@ -94,7 +94,7 @@ func (t *types) lookup(name string) (reflect.Type, bool) {
 
 // name looks up the name of a type, or empty if not registered. Unwraps pointers as necessary.
 func (t *types) name(rt reflect.Type) string {
-	for rt.Kind() == reflect.Pointer {
+	for rt.Kind() == reflect.Ptr {
 		rt = rt.Elem()
 	}
 	t.RLock()

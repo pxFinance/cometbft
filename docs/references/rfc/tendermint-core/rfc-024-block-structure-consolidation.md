@@ -249,7 +249,7 @@ at a height, opening up a major hole in the light client security model.
 
 This creates a recursive problem. To verify the validator set that signed the
 block at height `H`, what information do we need? We could fetch the
-`NextValidatorsHash` from height `H-1`, but how do we verify that hash is correct?
+`NextValidatorsHash` from height `H-1`, but how do we verify that that hash is correct?
 
 #### ProposerAddress
 
@@ -304,7 +304,7 @@ _each_ block. We could easily save the value and the height at which the value
 was updated and construct each block using the data that existed at the time.
 
 This document does not make any specific recommendations around storage since
-that is likely to change with upcoming improvements to the database infrastructure.
+that is likely to change with upcoming improvements to to the database infrastructure.
 However, it's important to note that removing fields from the block for the
 purposes of 'saving space' may not be that meaningful. We should instead focus
 our attention of removing fields from the block that are no longer needed

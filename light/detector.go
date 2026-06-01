@@ -26,7 +26,7 @@ import (
 // If there are no conflicting headers, the light client deems the verified target header
 // trusted and saves it to the trusted store.
 func (c *Client) detectDivergence(ctx context.Context, primaryTrace []*types.LightBlock, now time.Time) error {
-	if len(primaryTrace) < 2 {
+	if primaryTrace == nil || len(primaryTrace) < 2 {
 		return errors.New("nil or single block primary trace")
 	}
 	var (
@@ -127,7 +127,6 @@ func (c *Client) compareNewLightBlockWithWitness(ctx context.Context, errc chan 
 	switch err {
 	// no error means we move on to checking the hash of the two headers
 	case nil:
-		break
 
 	// the witness hasn't been helpful in comparing headers, we mark the response and continue
 	// comparing with the rest of the witnesses
@@ -205,14 +204,12 @@ func (c *Client) compareNewLightBlockWithWitness(ctx context.Context, errc chan 
 
 	if !bytes.Equal(h.Hash(), lightBlock.Hash()) {
 		errc <- ErrConflictingHeaders{Block: lightBlock, WitnessIndex: witnessIndex}
-		return
 	}
 
 	// ProposerPriorityHash is not part of the header hash, so we need to check it separately.
 	wanted, got := l.ValidatorSet.ProposerPriorityHash(), lightBlock.ValidatorSet.ProposerPriorityHash()
 	if !bytes.Equal(wanted, got) {
 		errc <- ErrProposerPrioritiesDiverge{WitnessHash: got, WitnessIndex: witnessIndex, PrimaryHash: wanted}
-		return
 	}
 
 	c.logger.Debug("Matching header received by witness", "height", h.Height, "witness", witnessIndex)
@@ -228,7 +225,7 @@ func (c *Client) sendEvidence(ctx context.Context, ev *types.LightClientAttackEv
 }
 
 // handleConflictingHeaders handles the primary style of attack, which is where a primary and witness have
-// two headers of the same height but with different hashes
+// two headers of the same height but with different hashes.
 func (c *Client) handleConflictingHeaders(
 	ctx context.Context,
 	primaryTrace []*types.LightBlock,
@@ -389,7 +386,7 @@ func (c *Client) examineConflictingHeaderAgainstTrace(
 // getTargetBlockOrLatest gets the latest height, if it is greater than the target height then it queries
 // the target height else it returns the latest. returns true if it successfully managed to acquire the target
 // height.
-func (c *Client) getTargetBlockOrLatest(
+func (*Client) getTargetBlockOrLatest(
 	ctx context.Context,
 	height int64,
 	witness provider.Provider,

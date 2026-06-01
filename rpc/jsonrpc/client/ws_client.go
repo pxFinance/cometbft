@@ -13,11 +13,11 @@ import (
 	"github.com/gorilla/websocket"
 	metrics "github.com/rcrowley/go-metrics"
 
+	cmtrand "github.com/cometbft/cometbft/internal/rand"
 	"github.com/cometbft/cometbft/libs/log"
-	cmtrand "github.com/cometbft/cometbft/libs/rand"
 	"github.com/cometbft/cometbft/libs/service"
 	cmtsync "github.com/cometbft/cometbft/libs/sync"
-	types "github.com/cometbft/cometbft/rpc/jsonrpc/types"
+	"github.com/cometbft/cometbft/rpc/jsonrpc/types"
 )
 
 const (
@@ -108,7 +108,7 @@ func NewWS(remoteAddr, endpoint string, options ...func(*WSClient)) (*WSClient, 
 		password, _ = parsedURL.User.Password()
 	}
 
-	dialFn, err := makeHTTPDialer(remoteAddr)
+	dialFn, err := MakeHTTPDialer(remoteAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -317,9 +317,7 @@ func (c *WSClient) reconnect() error {
 		time.Sleep(backoffDuration)
 
 		err := c.dial()
-		if err != nil {
-			c.Logger.Error("failed to redial", "err", err)
-		} else {
+		if err == nil {
 			c.Logger.Info("reconnected")
 			if c.onReconnect != nil {
 				go c.onReconnect()
@@ -327,6 +325,7 @@ func (c *WSClient) reconnect() error {
 			return nil
 		}
 
+		c.Logger.Error("failed to redial", "err", err)
 		attempt++
 
 		if attempt > c.maxReconnectAttempts {

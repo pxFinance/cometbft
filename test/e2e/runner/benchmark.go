@@ -20,7 +20,7 @@ import (
 // 4. Min block interval (fastest block)
 //
 // Metrics are based of the `benchmarkLength`, the amount of consecutive blocks
-// sampled from in the testnet
+// sampled from in the testnet.
 func Benchmark(ctx context.Context, testnet *e2e.Testnet, benchmarkLength int64) error {
 	block, _, err := waitForHeight(ctx, testnet, 0)
 	if err != nil {
@@ -207,7 +207,7 @@ func extractTestnetStats(intervals []time.Duration) testnetStats {
 
 	for _, interval := range intervals {
 		diff := (interval - mean).Seconds()
-		std += diff * diff
+		std += math.Pow(diff, 2)
 	}
 	std = math.Sqrt(std / float64(len(intervals)))
 
@@ -217,4 +217,11 @@ func extractTestnetStats(intervals []time.Duration) testnetStats {
 		max:  max,
 		min:  min,
 	}
+}
+
+func min(a, b int64) int64 {
+	if a > b {
+		return b
+	}
+	return a
 }

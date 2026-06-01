@@ -118,10 +118,12 @@ db_backend = "pebbledb"
 |                     | `"goleveldb"` | pure Golang   | [goleveldb](https://github.com/syndtr/goleveldb) |
 |                     | `"pebbledb"`  | pure Golang   | [pebble](https://github.com/cockroachdb/pebble)  |
 |                     | `"rocksdb"`   | requires gcc  | [grocksdb](https://github.com/linxGnu/grocksdb)  |
+|                     | `"cleveldb"`  | requires gcc  | [leveldb](https://github.com/google/leveldb)     |
+|                     | `"boltdb"`    | pure Golang   | [bbolt](https://github.com/etcd-io/bbolt)        |
 
 During the build process, by default, only the `pebbledb` library is built into the binary.
 To add support for alternative databases, you need to add them in the build tags.
-For example: `go build -tags rocksdb`.
+For example: `go build -tags cleveldb,rocksdb`.
 
 `goleveldb` is supported by default too, but it is no longer recommended for
 production use.
@@ -131,6 +133,8 @@ other databases claim a stable API.
 
 The supported databases are part of the [cometbft-db](https://github.com/cometbft/cometbft-db) library
 that CometBFT uses as a common database interface to various databases.
+
+**NOTE**: `boltdb` and `cleveldb` are deprecated and will be removed in a future release.
 
 ### db_dir
 The directory path where the database is stored.
@@ -173,7 +177,6 @@ log_level = "info"
 |                | `"*"`           | All modules                            |
 | **Log levels** | `"debug"`       |                                        |
 |                | `"info"`        |                                        |
-|                | `"warn"`        |                                        |
 |                | `"error"`       |                                        |
 |                | `"none"`        |                                        |
 
@@ -210,9 +213,7 @@ COMETBFT_BUILD_OPTIONS=nodebug make install
 > avoid compiling the binary with the `nodebug` build tag.
 
 ### log_format
-
 Define the output format of the logs.
-
 ```toml
 log_format = "plain"
 ```
@@ -222,10 +223,9 @@ log_format = "plain"
 | **Possible values** | `"plain"` |
 |                     | `"json"`  |
 
-`plain` provides ANSI plain-text logs, by default color-coded (can be changed using [`log_colors`](#log_colors)).
+`plain` provides ANSI color-coded plain-text logs.
 
 `json` provides JSON objects (one per line, not prettified) using the following (incomplete) schema:
-
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -274,22 +274,6 @@ log_format = "plain"
 > Note: The list of properties is not exhaustive. When implementing log parsing, check your logs and update the schema.
 
 <!--- Todo: Probably we should create separate schemas for the different log levels or modules. --->
-
-### log_colors
-
-Define whether the log output should be colored.
-Only relevant when [`log_format`](#log_format) is `plain`.
-
-```toml
-log_colors = true
-```
-
-| Value type          | boolean |
-|:--------------------|:--------|
-| **Possible values** | `true`  |
-|                     | `false` |
-
-The default is `true` when [`log_format`](#log_format) is `plain`.
 
 ### genesis_file
 Path to the JSON file containing the initial conditions for a CometBFT blockchain and the initial state of the application (more details [here](./genesis.json.md)).
@@ -866,8 +850,6 @@ seeds = ""
 
 The node will try to connect to any of the configured seed nodes when it needs
 addresses of potential peers to connect.
-If a node already has enough peer addresses in its address book, it may never
-need to dial the configured seed nodes.
 
 Example:
 ```toml
@@ -894,16 +876,6 @@ the configured [`p2p.max_num_outbound_peers`](#p2pmax_num_outbound_peers)
 Moreover, if a connection to a persistent peer is lost, the node will attempt
 reconnecting to that peer.
 
-Attempts to reconnect to a node configured as a persistent peer are performed
-first with regular interval, with up to 20 connection attempts, then with
-exponential increasing intervals, with additional 10 connection attempts.
-The first phase uses a random interval of `5s` with up to `3s` of random jitter
-between attempts;
-in the second phase intervals are exponential with base of `3s`, also with a
-random random jitter up to `3s`.
-As a result, the node will attempt reconnecting to a persisting peer for a
-total interval of around 8 hours before giving up.
-
 Once connected to a persistent peer, the node will request addresses of
 potential peers.
 This means that when persistent peers are configured the node may not need to
@@ -913,23 +885,6 @@ Example:
 ```toml
 persistent_peers = "fedcba@11.22.33.44:26656,beefdead@55.66.77.88:20000"
 ```
-
-### p2p.persistent_peers_max_dial_period
-
-Maximum pause between successive attempts when dialing a persistent peer.
-
-```toml
-persistent_peers_max_dial_period = "0s"
-```
-
-| Value type          | string (duration) |
-|:--------------------|:------------------|
-| **Possible values** | &gt;= `"0s"`      |
-
-When set to `"0s"`, an exponential backoff is applied when re-dialing the
-persistent peer, in the same way the node does with ordinary peers.
-If it set to non-zero value, the configured value becomes the minimum interval
-between attempts to connect to a node configured as a persistent peer.
 
 ### p2p.addr_book_file
 
@@ -1052,6 +1007,20 @@ Peers on this list also do not count towards the
 configured [`p2p.max_num_outbound_peers`](#p2pmax_num_outbound_peers) limit.
 
 Contrary to other settings, only the node ID has to be defined here, not the IP:port of the remote node.
+
+### p2p.persistent_peers_max_dial_period
+
+Maximum pause between successive attempts when dialing a persistent peer.
+
+```toml
+persistent_peers_max_dial_period = "0s"
+```
+
+| Value type          | string (duration) |
+|:--------------------|:------------------|
+| **Possible values** | &gt;= `"0s"`      |
+
+When set to `"0s"`, an exponential backoff is applied when re-dialing the persistent peer over and over.
 
 ### p2p.flush_throttle_timeout
 
@@ -1204,6 +1173,42 @@ allow_duplicate_ip = false
 When this setting is set to `true`, multiple connections are allowed from the same IP address (for example, on different
 ports).
 
+### p2p.handshake_timeout
+
+Timeout duration for protocol handshake (or secret connection negotiation).
+
+```toml
+handshake_timeout = "20s"
+```
+
+| Value type          | string (duration) |
+|:--------------------|:------------------|
+| **Possible values** | &gt;= `"0s"`      |
+
+This high-level timeout value is applied when the TCP connection has been
+established with a peer, and the node and peer are negotiating its upgrade into
+a secret authenticated connection.
+
+The value `"0s"` is undefined, and it can lead to unexpected behaviour.
+
+### p2p.dial_timeout
+
+Timeout duration for the low-level dialer that connects to the remote address on the TCP network.
+
+```toml
+dial_timeout = "3s"
+```
+
+| Value type          | string (duration) |
+|:--------------------|:------------------|
+| **Possible values** | &gt;= `"0s"`      |
+
+This parameter is the timeout value for dialing on TCP networks. If a hostname is used instead of an IP address and the
+hostname resolves to multiple IP addresses, the timeout is spread over each consecutive dial, such that each is given an
+appropriate fraction of the time to connect.
+
+Setting the value to `"0s"` disables the timeout.
+
 ## Mempool
 Mempool allows gathering and broadcasting uncommitted transactions among nodes.
 
@@ -1327,7 +1332,7 @@ max_tx_bytes = 1048576
 
 Transactions bigger than the maximum configured size are rejected by mempool,
 this applies to both transactions submitted by clients via RPC endpoints, and
-transactions receiving from peers on the mempool protocol.
+transactions receveing from peers on the mempool protocol.
 
 ### mempool.max_txs_bytes
 The maximum size in bytes of all transactions stored in the mempool.
@@ -1366,54 +1371,6 @@ cache_size = 10000
 The mempool cache is an internal store for transactions that the local node has already seen. Storing these transactions help in filtering incoming duplicate
 transactions: we can compare incoming transactions to already seen transactions and filter them out without going
 through the process of validating the incoming transaction.
-
-### mempool.seen_cache_size
-> App mempool only (`mempool.type = "app"`).
-
-Size of the LRU cache for seen transactions (deduplication when streaming txs from the app).
-```toml
-seen_cache_size = 100000
-```
-
-| Value type          | integer |
-|:--------------------|:--------|
-| **Possible values** | &gt;= 0 |
-
-### mempool.reap_max_bytes
-> App mempool only (`mempool.type = "app"`).
-
-Maximum bytes to request from the app when calling ReapTxs. Set to `0` for no limit.
-```toml
-reap_max_bytes = 0
-```
-
-| Value type          | integer |
-|:--------------------|:--------|
-| **Possible values** | &gt;= 0 |
-
-### mempool.reap_max_gas
-> App mempool only (`mempool.type = "app"`).
-
-Maximum gas to request from the app when calling ReapTxs. Set to `0` for no limit.
-```toml
-reap_max_gas = 0
-```
-
-| Value type          | integer |
-|:--------------------|:--------|
-| **Possible values** | &gt;= 0 |
-
-### mempool.reap_interval
-> App mempool only (`mempool.type = "app"`).
-
-Interval between ReapTxs calls when streaming transactions from the app to broadcast to peers.
-```toml
-reap_interval = "500ms"
-```
-
-| Value type          | duration |
-|:--------------------|:--------|
-| **Possible values** | &gt; 0   |
 
 ### mempool.keep-invalid-txs-in-cache
 Invalid transactions might become valid in the future, hence they are not added to the mempool cache by default.
@@ -1605,15 +1562,17 @@ trust_period = "168h0m0s"
 For Cosmos SDK-based chains, `statesync.trust_period` should usually be about 2/3rd of the unbonding period
 (about 2 weeks) during which they can be financially punished (slashed) for misbehavior.
 
-### statesync.max_discovery_time
-Time to spend discovering snapshots before switching to blocksync. If set to 0, state sync will be trying indefinitely.
+### statesync.discovery_time
+Time to spend discovering snapshots before initiating a restore.
 ```toml
-max_discovery_time = "2m"
+discovery_time = "15s"
 ```
 
-If `max_discovery_time` is zero, the node will keep trying to discover snapshots indefinitely.
+If `discovery_time` is &gt; 0 and  &lt; 5 seconds, its value will be overridden to 5 seconds.
 
-If `max_discovery_time` is greater than zero, the node will broadcast the "snapshot request" message to its peers and then wait for 5 sec. If no snapshot data has been received after that period, the node will retry: it will broadcast the "snapshot request" message again and wait for 5s, and so on until `max_discovery_time` is reached, after which the node will switch to blocksync.
+If `discovery_time` is zero, the node will not wait for replies once it has broadcast the "snapshot request" message to its peers. If no snapshot data is received, state sync will fail without retrying.
+
+If `discovery_time` is &gt;= 5 seconds, the node will broadcast the "snapshot request" message to its peers and then wait for `discovery_time`. If no snapshot data has been received after that period, the node will retry: it will broadcast the "snapshot request" message again and wait for `discovery_time`, and so on.
 
 ### statesync.temp_dir
 Temporary directory for state sync snapshot chunks.
@@ -1652,7 +1611,7 @@ The number of concurrent chunk fetchers to run.
 `0` is only allowed when state synchronization is disabled.
 
 ## Block synchronization
-Block synchronization configuration defines the version of block synchronization to use and optional adaptive sync.
+Block synchronization configuration is limited to defining a version of block synchronization to use.
 
 ### blocksync.version
 Block Sync version to use.
@@ -1665,16 +1624,6 @@ version = "v0"
 | **Possible values** | `"v0"`  |
 
 All other versions are deprecated. Further versions may be added in future releases.
-
-### blocksync.adaptive_sync
-When enabled, runs BLOCKSYNC and CONSENSUS simultaneously for improved liveness, connectivity, and performance. Blocks are ingested through consensus internals rather than switching from blocksync to consensus after catch-up.
-```toml
-adaptive_sync = false
-```
-
-| Value type          | boolean |
-|:--------------------|:--------|
-| **Default**         | `false` |
 
 ## Consensus
 
@@ -1753,53 +1702,36 @@ round of consensus will adopt increased timeout durations.
 Timeouts increase linearly over rounds, so that the `timeout_propose` adopted
 in round `r` is `timeout_propose + r * timeout_propose_delta`.
 
-### consensus.timeout_vote
+### consensus.timeout_prevote
 
-How long a node waits, after receiving +2/3 conflicting prevotes/precommits, before pre-committing nil/going into a new round.
+How long a node waits, after receiving +2/3 conflicting prevotes, before pre-committing nil.
 
 ```toml
-timeout_vote = "1s"
+timeout_prevote = "1s"
 ```
 
 | Value type          | string (duration) |
 |:--------------------|:------------------|
 | **Possible values** | &gt;= `"0s"`      |
 
-#### Prevotess
-
 A validator that receives +2/3 prevotes for a block, precommits that block.
 If it receives +2/3 prevotes for nil, it precommits nil.
 But if prevotes are received from +2/3 validators, but the prevotes do not
 match (e.g., they are for different blocks or for blocks and nil), the
-validator waits for `timeout_vote` time before precommiting nil.
+validator waits for `timeout_prevote` time before precommiting nil.
 This gives the validator a chance to wait for additional prevotes and to
 possibly observe +2/3 prevotes for a block.
 
-#### Precommits
+Setting `timeout_prevote` to `0s` means that the validator will not wait
+for additional prevotes (other than the mandatory +2/3) before precommitting nil.
+This has important liveness implications and should be avoided.
 
-A node that receives +2/3 precommits for a block commits that block.
-This is a successful consensus round.
-If no block gathers +2/3 precommits, the node cannot commit.
-This is an unsuccessful consensus round and the node will start an additional
-round of consensus.
-Before starting the next round, the node waits for `timeout_vote` time.
-This gives the node a chance to wait for additional precommits and to possibly
-observe +2/3 precommits for a block, which would allow the node to commit that
-block in the current round.
+### consensus.timeout_prevote_delta
 
-#### Warning
-
-Setting `timeout_vote` to `0s` means that the validator will not wait for
-additional prevotes/precommits (other than the mandatory +2/3) before
-precommitting nil/moving to the next round. This has important liveness
-implications and should be avoided.
-
-### consensus.timeout_vote_delta
-
-How much the `timeout_vote` increases with each round.
+How much the `timeout_prevote` increases with each round.
 
 ```toml
-timeout_vote_delta = "500ms"
+timeout_prevote_delta = "500ms"
 ```
 
 | Value type          | string (duration) |
@@ -1809,8 +1741,51 @@ timeout_vote_delta = "500ms"
 Consensus timeouts are adaptive.
 This means that when a round of consensus fails to commit a block, the next
 round of consensus will adopt increased timeout durations.
-Timeouts increase linearly over rounds, so that the `timeout_vote` adopted
-in round `r` is `timeout_vote + r * timeout_vote_delta`.
+Timeouts increase linearly over rounds, so that the `timeout_prevote` adopted
+in round `r` is `timeout_prevote + r * timeout_prevote_delta`.
+
+### consensus.timeout_precommit
+
+How long a node waits, after receiving +2/3 conflicting precommits, before moving to the next round.
+
+```toml
+timeout_precommit = "1s"
+```
+
+| Value type          | string (duration) |
+|:--------------------|:------------------|
+| **Possible values** | &gt;= `"0s"`      |
+
+A node that receives +2/3 precommits for a block commits that block.
+This is a successful consensus round.
+If no block gathers +2/3 precommits, the node cannot commit.
+This is an unsuccessful consensus round and the node will start an additional
+round of consensus.
+Before starting the next round, the node waits for `timeout_precommit` time.
+This gives the node a chance to wait for additional precommits and to possibly
+observe +2/3 precommits for a block, which would allow the node to commit that
+block in the current round.
+
+Setting `timeout_precommit` to `0s` means that the validator will not wait
+for additional precommits (other than the mandatory +2/3) before moving to the
+next round.
+This has important liveness implications and should be avoided.
+
+### consensus.timeout_precommit_delta
+How much the timeout_precommit increases with each round.
+```toml
+timeout_precommit_delta = "500ms"
+```
+
+| Value type          | string (duration) |
+|:--------------------|:------------------|
+| **Possible values** | &gt;= `"0ms"`     |
+
+Consensus timeouts are adaptive.
+This means that when a round of consensus fails to commit a block, the next
+round of consensus will adopt increased timeout durations.
+Timeouts increase linearly over rounds, so that the `timeout_precommit` adopted
+in round `r` is `timeout_precommit + r * timeout_precommit_delta`.
 
 ### consensus.timeout_commit
 
@@ -1835,16 +1810,23 @@ The `timeout_commit` is not a required component of the consensus algorithm,
 meaning that there are no liveness implications if it is set to `0s`.
 But it may have implications in the way the application rewards validators.
 
-Notice also that the minimum interval defined with `timeout_commit` includes
-the time that both CometBFT and the application take to process the committed block.
-
 Setting `timeout_commit` to `0s` means that the node will start the next height
 as soon as it gathers all the mandatory +2/3 precommits for a block.
 
-**Notice** that the `timeout_commit` configuration flag is **deprecated** from v1.0.
-It is now up to the application to return a `next_block_delay` value upon
-[`FinalizeBlock`](https://github.com/cometbft/cometbft/blob/main/spec/abci/abci%2B%2B_methods.md#finalizeblock)
-to define how long CometBFT should wait before starting the next height.
+### consensus.skip_timeout_commit
+
+Start the next height as soon as the node gathers all the mandatory +2/3 precommits for a block.
+
+```toml
+skip_timeout_commit = false
+```
+
+| Value type          | boolean |
+|:--------------------|:--------|
+| **Possible values** | `false` |
+|                     | `true`  |
+
+Deprecated: use `timeout_commit = "0s"` instead.
 
 ### consensus.double_sign_check_height
 
@@ -2344,8 +2326,3 @@ a proposal from another validator and prevote `nil` due to him starting
 `timeout_propose` earlier. I.e., if Bob's `timeout_commit` is too low comparing
 to other validators, then he might miss some proposals and get slashed for
 inactivity.
-
-**Notice** that the `timeout_commit` configuration flag is **deprecated** from v1.0.
-It is now up to the application to return a `next_block_delay` value upon
-[`FinalizeBlock`](https://github.com/cometbft/cometbft/blob/main/spec/abci/abci%2B%2B_methods.md#finalizeblock)
-to define how long CometBFT should wait before starting the next height.

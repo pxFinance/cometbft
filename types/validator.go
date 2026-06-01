@@ -4,18 +4,21 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
+	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cometbft/cometbft/crypto"
 	ce "github.com/cometbft/cometbft/crypto/encoding"
-	cmtrand "github.com/cometbft/cometbft/libs/rand"
-	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	"github.com/cometbft/cometbft/internal/keytypes"
+	cmtrand "github.com/cometbft/cometbft/internal/rand"
 )
+
+// ErrUnsupportedPubKeyType is returned when a public key type is not supported.
+var ErrUnsupportedPubKeyType = errors.New("unsupported pubkey type, must be one of: " + keytypes.SupportedKeyTypesStr())
 
 // Volatile state for each Validator
 // NOTE: The ProposerPriority is not included in Validator.Hash();
-// make sure to update that method if changes are made here
+// make sure to update that method if changes are made here.
 type Validator struct {
 	Address     Address       `json:"address"`
 	PubKey      crypto.PubKey `json:"pub_key"`
@@ -52,6 +55,10 @@ func (v *Validator) ValidateBasic() error {
 		return fmt.Errorf("validator address is incorrectly derived from pubkey. Exp: %v, got %v", addr, v.Address)
 	}
 
+	if !keytypes.IsSupported(v.PubKey.Type()) {
+		return ErrUnsupportedPubKeyType
+	}
+
 	return nil
 }
 
@@ -85,12 +92,12 @@ func (v *Validator) CompareProposerPriority(other *Validator) *Validator {
 	}
 }
 
-// String returns a string representation of Validator.
+// String returns a string representation of String.
 //
 // 1. address
 // 2. public key
 // 3. voting power
-// 4. proposer priority
+// 4. proposer priority.
 func (v *Validator) String() string {
 	if v == nil {
 		return "nil-Validator"
@@ -104,20 +111,16 @@ func (v *Validator) String() string {
 
 // ValidatorListString returns a prettified validator list for logging purposes.
 func ValidatorListString(vals []*Validator) string {
-	var sb strings.Builder
+	chunks := make([]string, len(vals))
 	for i, val := range vals {
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		sb.WriteString(val.Address.String())
-		sb.WriteString(":")
-		sb.WriteString(strconv.FormatInt(val.VotingPower, 10))
+		chunks[i] = fmt.Sprintf("%s:%d", val.Address, val.VotingPower)
 	}
-	return sb.String()
+
+	return strings.Join(chunks, ",")
 }
 
 // Bytes computes the unique encoding of a validator with a given voting power.
-// These are the bytes that get hashed in consensus. It excludes address
+// These are the bytes that gets hashed in consensus. It excludes address
 // as its redundant with the pubkey. This also excludes ProposerPriority
 // which changes every round.
 func (v *Validator) Bytes() []byte {
@@ -138,20 +141,20 @@ func (v *Validator) Bytes() []byte {
 	return bz
 }
 
-// ToProto converts Validator to protobuf
+// ToProto converts Validator to protobuf.
 func (v *Validator) ToProto() (*cmtproto.Validator, error) {
 	if v == nil {
 		return nil, errors.New("nil validator")
 	}
 
-	pk, err := ce.PubKeyToProto(v.PubKey)
-	if err != nil {
-		return nil, err
+	if v.PubKey == nil {
+		return nil, errors.New("nil pubkey")
 	}
 
 	vp := cmtproto.Validator{
 		Address:          v.Address,
-		PubKey:           pk,
+		PubKeyType:       v.PubKey.Type(),
+		PubKeyBytes:      v.PubKey.Bytes(),
 		VotingPower:      v.VotingPower,
 		ProposerPriority: v.ProposerPriority,
 	}
@@ -166,9 +169,12 @@ func ValidatorFromProto(vp *cmtproto.Validator) (*Validator, error) {
 		return nil, errors.New("nil validator")
 	}
 
-	pk, err := ce.PubKeyFromProto(vp.PubKey)
+	pk, err := ce.PubKeyFromTypeAndBytes(vp.PubKeyType, vp.PubKeyBytes)
 	if err != nil {
-		return nil, err
+		pk, err = ce.PubKeyFromProto(*vp.PubKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 	v := new(Validator)
 	v.Address = vp.GetAddress()
@@ -179,11 +185,11 @@ func ValidatorFromProto(vp *cmtproto.Validator) (*Validator, error) {
 	return v, nil
 }
 
-//----------------------------------------
+// ----------------------------------------
 // RandValidator
 
 // RandValidator returns a randomized validator, useful for testing.
-// UNSTABLE
+// UNSTABLE.
 func RandValidator(randPower bool, minPower int64) (*Validator, PrivValidator) {
 	privVal := NewMockPV()
 	votePower := minPower

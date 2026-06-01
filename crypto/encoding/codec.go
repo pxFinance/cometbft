@@ -2,27 +2,27 @@ package encoding
 
 import (
 	"fmt"
+	"reflect"
 
+	pc "github.com/cometbft/cometbft/api/cometbft/crypto/v1"
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/bls12381"
 	"github.com/cometbft/cometbft/crypto/ed25519"
-	"github.com/cometbft/cometbft/crypto/mldsa65"
 	"github.com/cometbft/cometbft/crypto/secp256k1"
 	"github.com/cometbft/cometbft/libs/json"
-	pc "github.com/cometbft/cometbft/proto/tendermint/crypto"
 )
 
 // ErrUnsupportedKey describes an error resulting from the use of an
 // unsupported key in [PubKeyToProto] or [PubKeyFromProto].
 type ErrUnsupportedKey struct {
-	Key any
+	KeyType string
 }
 
 func (e ErrUnsupportedKey) Error() string {
-	return fmt.Sprintf("encoding: unsupported key %v", e.Key)
+	return "encoding: unsupported key " + e.KeyType
 }
 
-// ErrInvalidKeyLen describes an error resulting from the use of a key with
+// InvalidKeyLen describes an error resulting from the use of a key with
 // an invalid length in [PubKeyFromProto].
 type ErrInvalidKeyLen struct {
 	Key       any
@@ -40,28 +40,33 @@ func init() {
 	if bls12381.Enabled {
 		json.RegisterType((*pc.PublicKey_Bls12381)(nil), "tendermint.crypto.PublicKey_Bls12381")
 	}
-	json.RegisterType((*pc.PublicKey_Mldsa65)(nil), "tendermint.crypto.PublicKey_Mldsa65")
 }
 
-// PubKeyToProto takes crypto.PubKey and transforms it to a protobuf Pubkey
+// PubKeyToProto takes crypto.PubKey and transforms it to a protobuf Pubkey. It
+// returns ErrUnsupportedKey if the pubkey type is unsupported.
 func PubKeyToProto(k crypto.PubKey) (pc.PublicKey, error) {
 	var kp pc.PublicKey
-	switch k := k.(type) {
-	case ed25519.PubKey:
+
+	if k == nil {
+		return kp, ErrUnsupportedKey{KeyType: "<nil>"}
+	}
+
+	switch k.Type() {
+	case ed25519.KeyType:
 		kp = pc.PublicKey{
 			Sum: &pc.PublicKey_Ed25519{
-				Ed25519: k,
+				Ed25519: k.Bytes(),
 			},
 		}
-	case secp256k1.PubKey:
+	case secp256k1.KeyType:
 		kp = pc.PublicKey{
 			Sum: &pc.PublicKey_Secp256K1{
-				Secp256K1: k,
+				Secp256K1: k.Bytes(),
 			},
 		}
-	case bls12381.PubKey:
+	case bls12381.KeyType:
 		if !bls12381.Enabled {
-			return kp, ErrUnsupportedKey{Key: k}
+			return kp, ErrUnsupportedKey{KeyType: bls12381.KeyType}
 		}
 
 		kp = pc.PublicKey{
@@ -69,40 +74,42 @@ func PubKeyToProto(k crypto.PubKey) (pc.PublicKey, error) {
 				Bls12381: k.Bytes(),
 			},
 		}
-	case mldsa65.PubKey:
-		kp = pc.PublicKey{
-			Sum: &pc.PublicKey_Mldsa65{
-				Mldsa65: k.Bytes(),
-			},
-		}
 	default:
-		return kp, fmt.Errorf("toproto: key type %v is not supported", k)
+		return kp, ErrUnsupportedKey{KeyType: k.Type()}
 	}
 	return kp, nil
 }
 
-// PubKeyFromProto takes a protobuf Pubkey and transforms it to a crypto.Pubkey
+// PubKeyFromProto takes a protobuf Pubkey and transforms it to a
+// crypto.Pubkey. It returns ErrUnsupportedKey if the pubkey type is
+// unsupported or ErrInvalidKeyLen if the key length is invalid.
 func PubKeyFromProto(k pc.PublicKey) (crypto.PubKey, error) {
 	switch k := k.Sum.(type) {
 	case *pc.PublicKey_Ed25519:
 		if len(k.Ed25519) != ed25519.PubKeySize {
-			return nil, fmt.Errorf("invalid size for PubKeyEd25519. Got %d, expected %d",
-				len(k.Ed25519), ed25519.PubKeySize)
+			return nil, ErrInvalidKeyLen{
+				Key:  k,
+				Got:  len(k.Ed25519),
+				Want: ed25519.PubKeySize,
+			}
 		}
 		pk := make(ed25519.PubKey, ed25519.PubKeySize)
 		copy(pk, k.Ed25519)
 		return pk, nil
 	case *pc.PublicKey_Secp256K1:
 		if len(k.Secp256K1) != secp256k1.PubKeySize {
-			return nil, fmt.Errorf("invalid size for PubKeySecp256k1. Got %d, expected %d",
-				len(k.Secp256K1), secp256k1.PubKeySize)
+			return nil, ErrInvalidKeyLen{
+				Key:  k,
+				Got:  len(k.Secp256K1),
+				Want: secp256k1.PubKeySize,
+			}
 		}
 		pk := make(secp256k1.PubKey, secp256k1.PubKeySize)
 		copy(pk, k.Secp256K1)
 		return pk, nil
 	case *pc.PublicKey_Bls12381:
 		if !bls12381.Enabled {
-			return nil, ErrUnsupportedKey{Key: k}
+			return nil, ErrUnsupportedKey{KeyType: bls12381.KeyType}
 		}
 
 		if len(k.Bls12381) != bls12381.PubKeySize {
@@ -113,23 +120,19 @@ func PubKeyFromProto(k pc.PublicKey) (crypto.PubKey, error) {
 			}
 		}
 		return bls12381.NewPublicKeyFromBytes(k.Bls12381)
-	case *pc.PublicKey_Mldsa65:
-		if len(k.Mldsa65) != mldsa65.PubKeySize {
-			return nil, ErrInvalidKeyLen{
-				Key:  k,
-				Got:  len(k.Mldsa65),
-				Want: mldsa65.PubKeySize,
-			}
-		}
-		return mldsa65.NewPubKeyFromBytes(k.Mldsa65)
 	default:
-		return nil, fmt.Errorf("fromproto: key type %v is not supported", k)
+		kt := reflect.TypeOf(k)
+		if kt == nil {
+			return nil, ErrUnsupportedKey{KeyType: "<nil>"}
+		} else {
+			return nil, ErrUnsupportedKey{KeyType: kt.String()}
+		}
 	}
 }
 
-// PubKeyFromTypeAndBytes builds a crypto.PubKey from the given type
-// and bytes. It returns ErrUnsupportedKey if the pubkey type is
-// unsupported.
+// PubKeyFromTypeAndBytes builds a crypto.PubKey from the given type and bytes.
+// It returns ErrUnsupportedKey if the pubkey type is unsupported or
+// ErrInvalidKeyLen if the key length is invalid.
 func PubKeyFromTypeAndBytes(pkType string, bytes []byte) (crypto.PubKey, error) {
 	var pubKey crypto.PubKey
 	switch pkType {
@@ -159,7 +162,7 @@ func PubKeyFromTypeAndBytes(pkType string, bytes []byte) (crypto.PubKey, error) 
 		pubKey = pk
 	case bls12381.KeyType:
 		if !bls12381.Enabled {
-			return nil, ErrUnsupportedKey{Key: pkType}
+			return nil, ErrUnsupportedKey{KeyType: pkType}
 		}
 
 		if len(bytes) != bls12381.PubKeySize {
@@ -171,18 +174,8 @@ func PubKeyFromTypeAndBytes(pkType string, bytes []byte) (crypto.PubKey, error) 
 		}
 
 		return bls12381.NewPublicKeyFromBytes(bytes)
-	case mldsa65.KeyType:
-		if len(bytes) != mldsa65.PubKeySize {
-			return nil, ErrInvalidKeyLen{
-				Key:  pkType,
-				Got:  len(bytes),
-				Want: mldsa65.PubKeySize,
-			}
-		}
-
-		return mldsa65.NewPubKeyFromBytes(bytes)
 	default:
-		return nil, ErrUnsupportedKey{Key: pkType}
+		return nil, ErrUnsupportedKey{KeyType: pkType}
 	}
 	return pubKey, nil
 }

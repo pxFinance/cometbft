@@ -59,7 +59,7 @@ const (
 type Message int
 
 const (
-	MessageUnknown Message = iota
+	MeesageUnknown Message = iota
 	MessageProposal
 	MessageVotes
 	MessageDecision

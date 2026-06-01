@@ -1,4 +1,4 @@
-//go:build gofuzz || go1.21
+//go:build gofuzz || go1.20
 
 package tests
 
@@ -10,12 +10,12 @@ import (
 	"testing"
 
 	"github.com/cometbft/cometbft/crypto/ed25519"
-	"github.com/cometbft/cometbft/libs/async"
+	"github.com/cometbft/cometbft/internal/async"
 	sc "github.com/cometbft/cometbft/p2p/conn"
 )
 
 func FuzzP2PSecretConnection(f *testing.F) {
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		fuzz(data)
 	})
 }
@@ -69,12 +69,12 @@ func (drw kvstoreConn) Close() (err error) {
 	err2 := drw.PipeWriter.CloseWithError(io.EOF)
 	err1 := drw.PipeReader.Close()
 	if err2 != nil {
-		return err
+		return err //nolint:nilerr // this is a false positive
 	}
 	return err1
 }
 
-// Each returned ReadWriteCloser is akin to a net.Connection
+// Each returned ReadWriteCloser is akin to a net.Connection.
 func makeKVStoreConnPair() (fooConn, barConn kvstoreConn) {
 	barReader, fooWriter := io.Pipe()
 	fooReader, barWriter := io.Pipe()
@@ -99,7 +99,7 @@ func makeSecretConnPair() (fooSecConn, barSecConn *sc.SecretConnection) {
 				return nil, true, err
 			}
 			remotePubBytes := fooSecConn.RemotePubKey()
-			if !remotePubBytes.Equals(barPubKey) {
+			if !bytes.Equal(remotePubBytes.Bytes(), barPubKey.Bytes()) {
 				err = fmt.Errorf("unexpected fooSecConn.RemotePubKey.  Expected %v, got %v",
 					barPubKey, fooSecConn.RemotePubKey())
 				log.Print(err)
@@ -114,7 +114,7 @@ func makeSecretConnPair() (fooSecConn, barSecConn *sc.SecretConnection) {
 				return nil, true, err
 			}
 			remotePubBytes := barSecConn.RemotePubKey()
-			if !remotePubBytes.Equals(fooPubKey) {
+			if !bytes.Equal(remotePubBytes.Bytes(), fooPubKey.Bytes()) {
 				err = fmt.Errorf("unexpected barSecConn.RemotePubKey.  Expected %v, got %v",
 					fooPubKey, barSecConn.RemotePubKey())
 				log.Print(err)

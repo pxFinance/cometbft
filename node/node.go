@@ -3,32 +3,36 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/pxFinance/metrics/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 
-	bc "github.com/cometbft/cometbft/blocksync"
-	cfg "github.com/cometbft/cometbft/config"
-	cs "github.com/cometbft/cometbft/consensus"
-	"github.com/cometbft/cometbft/evidence"
-	"github.com/cometbft/cometbft/light"
+	_ "net/http/pprof" //nolint: gosec
 
+	cfg "github.com/cometbft/cometbft/config"
+	bc "github.com/cometbft/cometbft/internal/blocksync"
+	cs "github.com/cometbft/cometbft/internal/consensus"
+	"github.com/cometbft/cometbft/internal/evidence"
 	"github.com/cometbft/cometbft/libs/log"
 	cmtpubsub "github.com/cometbft/cometbft/libs/pubsub"
 	"github.com/cometbft/cometbft/libs/service"
-	"github.com/cometbft/cometbft/lp2p"
+	"github.com/cometbft/cometbft/light"
 	mempl "github.com/cometbft/cometbft/mempool"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/p2p/pex"
 	"github.com/cometbft/cometbft/proxy"
 	rpccore "github.com/cometbft/cometbft/rpc/core"
-	grpccore "github.com/cometbft/cometbft/rpc/grpc"
+	grpcserver "github.com/cometbft/cometbft/rpc/grpc/server"
+	grpcprivserver "github.com/cometbft/cometbft/rpc/grpc/server/privileged"
 	rpcserver "github.com/cometbft/cometbft/rpc/jsonrpc/server"
 	sm "github.com/cometbft/cometbft/state"
 	"github.com/cometbft/cometbft/state/indexer"
@@ -39,8 +43,6 @@ import (
 	"github.com/cometbft/cometbft/types"
 	cmttime "github.com/cometbft/cometbft/types/time"
 	"github.com/cometbft/cometbft/version"
-
-	_ "net/http/pprof" //nolint: gosec
 )
 
 // Node is the highest level interface to a full CometBFT node.
@@ -54,8 +56,9 @@ type Node struct {
 	privValidator types.PrivValidator // local node's validator key
 
 	// network
-	transport   p2p.Transport
-	sw          p2p.Switcher // p2p connections
+	transport   *p2p.MultiplexTransport
+	sw          *p2p.Switch  // p2p connections
+	addrBook    pex.AddrBook // known peers
 	nodeInfo    p2p.NodeInfo
 	nodeKey     *p2p.NodeKey // our node privkey
 	isListening bool
@@ -64,8 +67,9 @@ type Node struct {
 	eventBus          *types.EventBus // pub/sub for services
 	stateStore        sm.Store
 	blockStore        *store.BlockStore // store the blockchain to disk
-	bcReactor         p2p.Reactor       // for block-syncing
-	mempoolReactor    waitSyncReactor   // for gossipping transactions
+	pruner            *sm.Pruner
+	bcReactor         p2p.Reactor        // for block-syncing
+	mempoolReactor    waitSyncP2PReactor // for gossipping transactions
 	mempool           mempl.Mempool
 	stateSync         bool                    // whether the node should state sync on startup
 	stateSyncReactor  *statesync.Reactor      // for hosting and restoring state sync snapshots
@@ -73,6 +77,7 @@ type Node struct {
 	stateSyncGenesis  sm.State                // provides the genesis state for state sync
 	consensusState    *cs.State               // latest consensus state
 	consensusReactor  *cs.Reactor             // for participating in the consensus
+	pexReactor        *pex.Reactor            // for exchanging peer addresses
 	evidencePool      *evidence.Pool          // tracking evidence
 	proxyApp          proxy.AppConns          // connection to the application
 	rpcListeners      []net.Listener          // rpc servers
@@ -81,9 +86,10 @@ type Node struct {
 	indexerService    *txindex.IndexerService
 	prometheusSrv     *http.Server
 	pprofSrv          *http.Server
+	meter             metrics.Meter
 }
 
-type waitSyncReactor interface {
+type waitSyncP2PReactor interface {
 	p2p.Reactor
 	// required by RPC service
 	WaitSync() bool
@@ -107,39 +113,27 @@ type Option func(*Node)
 func CustomReactors(reactors map[string]p2p.Reactor) Option {
 	return func(n *Node) {
 		for name, reactor := range reactors {
-			if existingReactor, ok := n.sw.Reactor(name); ok {
-				n.sw.Log().Info("Replacing existing reactor with a custom one",
+			if existingReactor := n.sw.Reactor(name); existingReactor != nil {
+				n.sw.Logger.Info("Replacing existing reactor with a custom one",
 					"name", name, "existing", existingReactor, "custom", reactor)
 				n.sw.RemoveReactor(name, existingReactor)
 			}
 			n.sw.AddReactor(name, reactor)
-
 			// register the new channels to the nodeInfo
 			// NOTE: This is a bit messy now with the type casting but is
 			// cleaned up in the following version when NodeInfo is changed from
 			// and interface to a concrete type
-			ni, ok := n.nodeInfo.(p2p.DefaultNodeInfo)
-			if !ok {
-				n.Logger.Error("Node info is not of type DefaultNodeInfo. Custom reactor channels can not be added.")
-				continue
-			}
-
-			mp, ok := n.transport.(*p2p.MultiplexTransport)
-			if !ok {
-				n.Logger.Error("Transport is not of type MultiplexTransport. Custom reactor channels can not be added.")
-				continue
-			}
-
-			for _, chDesc := range reactor.GetChannels() {
-				if ni.HasChannel(chDesc.ID) {
-					continue
+			if ni, ok := n.nodeInfo.(p2p.DefaultNodeInfo); ok {
+				for _, chDesc := range reactor.GetChannels() {
+					if !ni.HasChannel(chDesc.ID) {
+						ni.Channels = append(ni.Channels, chDesc.ID)
+						n.transport.AddChannel(chDesc.ID)
+					}
 				}
-
-				ni.Channels = append(ni.Channels, chDesc.ID)
-				mp.AddChannel(chDesc.ID)
+				n.nodeInfo = ni
+			} else {
+				n.Logger.Error("Node info is not of type DefaultNodeInfo. Custom reactor channels can not be added.")
 			}
-
-			n.nodeInfo = ni
 		}
 	}
 }
@@ -158,16 +152,7 @@ func StateProvider(stateProvider statesync.StateProvider) Option {
 // store are empty at the time the function is called.
 //
 // If the block store is not empty, the function returns an error.
-func BootstrapState(ctx context.Context, config *cfg.Config, dbProvider cfg.DBProvider, height uint64, appHash []byte) error {
-	return BootstrapStateWithGenProvider(ctx, config, dbProvider, DefaultGenesisDocProviderFunc(config), height, appHash)
-}
-
-// BootstrapStateWithGenProvider synchronizes the stores with the application after state sync
-// has been performed offline. It is expected that the block store and state
-// store are empty at the time the function is called.
-//
-// If the block store is not empty, the function returns an error.
-func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbProvider cfg.DBProvider, genProvider GenesisDocProvider, height uint64, appHash []byte) (err error) {
+func BootstrapState(ctx context.Context, config *cfg.Config, dbProvider cfg.DBProvider, genProvider GenesisDocProvider, height uint64, appHash []byte) (err error) {
 	logger := log.NewTMLogger(log.NewSyncWriter(os.Stdout))
 	if ctx == nil {
 		ctx = context.Background()
@@ -181,7 +166,11 @@ func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbPr
 	if dbProvider == nil {
 		dbProvider = cfg.DefaultDBProvider
 	}
-	blockStore, stateDB, err := initDBs(config, dbProvider)
+
+	blockStoreDB, stateDB, err := initDBs(config, dbProvider)
+
+	blockStore := store.NewBlockStore(blockStoreDB, store.WithMetrics(store.NopMetrics()), store.WithCompaction(config.Storage.Compact, config.Storage.CompactionInterval), store.WithDBKeyLayout(config.Storage.ExperimentalKeyLayout))
+	logger.Info("Blockstore version", "version", blockStore.GetVersion())
 
 	defer func() {
 		if derr := blockStore.Close(); derr != nil {
@@ -196,11 +185,13 @@ func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbPr
 	}
 
 	if !blockStore.IsEmpty() {
-		return fmt.Errorf("blockstore not empty, trying to initialize non empty state")
+		return errors.New("blockstore not empty, trying to initialize non empty state")
 	}
 
 	stateStore := sm.NewStore(stateDB, sm.StoreOptions{
 		DiscardABCIResponses: config.Storage.DiscardABCIResponses,
+		Logger:               logger,
+		DBKeyLayout:          config.Storage.ExperimentalKeyLayout,
 	})
 
 	defer func() {
@@ -216,22 +207,24 @@ func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbPr
 	}
 
 	if !state.IsEmpty() {
-		return fmt.Errorf("state not empty, trying to initialize non empty state")
+		return errors.New("state not empty, trying to initialize non empty state")
 	}
 
-	genState, _, err := LoadStateFromDBOrGenesisDocProvider(stateDB, genProvider)
+	// The state store will use the DBKeyLayout set in config or already existing in the DB.
+	genState, _, err := LoadStateFromDBOrGenesisDocProvider(stateDB, genProvider, "")
 	if err != nil {
 		return err
 	}
 
-	stateProvider, err := statesync.NewLightClientStateProvider(
+	stateProvider, err := statesync.NewLightClientStateProviderWithDBKeyVersion(
 		ctx,
 		genState.ChainID, genState.Version, genState.InitialHeight,
 		config.StateSync.RPCServers, light.TrustOptions{
 			Period: config.StateSync.TrustPeriod,
 			Height: config.StateSync.TrustHeight,
 			Hash:   config.StateSync.TrustHashBytes(),
-		}, logger.With("module", "light"))
+		}, logger.With("module", "light"),
+		config.Storage.ExperimentalKeyLayout)
 	if err != nil {
 		return fmt.Errorf("failed to set up light client state provider: %w", err)
 	}
@@ -250,7 +243,6 @@ func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbPr
 			logger.Error("failed to close statestore: %w", err)
 		}
 		return fmt.Errorf("the app hash returned by the light client does not match the provided appHash, expected %X, got %X", state.AppHash, appHash)
-
 	}
 
 	commit, err := stateProvider.Commit(ctx, height)
@@ -279,27 +271,10 @@ func BootstrapStateWithGenProvider(ctx context.Context, config *cfg.Config, dbPr
 	return err
 }
 
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 
 // NewNode returns a new, ready to go, CometBFT Node.
 func NewNode(
-	config *cfg.Config,
-	privValidator types.PrivValidator,
-	nodeKey *p2p.NodeKey,
-	clientCreator proxy.ClientCreator,
-	genesisDocProvider GenesisDocProvider,
-	dbProvider cfg.DBProvider,
-	metricsProvider MetricsProvider,
-	logger log.Logger,
-	options ...Option,
-) (*Node, error) {
-	return NewNodeWithContext(context.TODO(), config, privValidator,
-		nodeKey, clientCreator, genesisDocProvider, dbProvider,
-		metricsProvider, logger, options...)
-}
-
-// NewNodeWithContext is cancellable version of NewNode.
-func NewNodeWithContext(
 	ctx context.Context,
 	config *cfg.Config,
 	privValidator types.PrivValidator,
@@ -309,23 +284,89 @@ func NewNodeWithContext(
 	dbProvider cfg.DBProvider,
 	metricsProvider MetricsProvider,
 	logger log.Logger,
+	meter metrics.Meter,
 	options ...Option,
 ) (*Node, error) {
-	blockStore, stateDB, err := initDBs(config, dbProvider)
+	return NewNodeWithCliParams(
+		ctx,
+		config,
+		privValidator,
+		nodeKey,
+		clientCreator,
+		genesisDocProvider,
+		dbProvider,
+		metricsProvider,
+		logger,
+		CliParams{},
+		meter,
+		options...,
+	)
+}
+
+// NewNodeWithCliParams returns a new, ready to go, CometBFT node
+// where we check the hash of the provided genesis file against
+// a hash provided by the operator via cli.
+
+func NewNodeWithCliParams(
+	ctx context.Context,
+	config *cfg.Config,
+	privValidator types.PrivValidator,
+	nodeKey *p2p.NodeKey,
+	clientCreator proxy.ClientCreator,
+	genesisDocProvider GenesisDocProvider,
+	dbProvider cfg.DBProvider,
+	metricsProvider MetricsProvider,
+	logger log.Logger,
+	cliParams CliParams,
+	meter metrics.Meter,
+	options ...Option,
+) (*Node, error) {
+	if meter == nil {
+		meter = metrics.NewNilMeter()
+	}
+
+	if config.BaseConfig.DBBackend == "boltdb" || config.BaseConfig.DBBackend == "cleveldb" {
+		logger.Info("WARNING: BoltDB and GoLevelDB are deprecated and will be removed in a future release. Please switch to a different backend.")
+	}
+
+	blockStoreDB, stateDB, err := initDBs(config, dbProvider)
 	if err != nil {
 		return nil, err
 	}
 
+	var genesisHash string
+	if len(cliParams.GenesisHash) != 0 {
+		genesisHash = hex.EncodeToString(cliParams.GenesisHash)
+	}
+	state, genDoc, err := LoadStateFromDBOrGenesisDocProvider(stateDB, genesisDocProvider, genesisHash)
+	if err != nil {
+		return nil, err
+	}
+
+	csMetrics, p2pMetrics, memplMetrics, smMetrics, bstMetrics, abciMetrics, bsMetrics, ssMetrics := metricsProvider(genDoc.ChainID)
 	stateStore := sm.NewStore(stateDB, sm.StoreOptions{
 		DiscardABCIResponses: config.Storage.DiscardABCIResponses,
+		Metrics:              smMetrics,
+		Meter:                meter.SubMeter("state", metrics.Tag("svc", "state")),
+		Compact:              config.Storage.Compact,
+		CompactionInterval:   config.Storage.CompactionInterval,
+		Logger:               logger,
+		DBKeyLayout:          config.Storage.ExperimentalKeyLayout,
 	})
 
-	state, genDoc, err := LoadStateFromDBOrGenesisDocProvider(stateDB, genesisDocProvider)
-	if err != nil {
-		return nil, err
-	}
+	blockStore := store.NewBlockStore(blockStoreDB, store.WithMetrics(bstMetrics), store.WithCompaction(config.Storage.Compact, config.Storage.CompactionInterval), store.WithDBKeyLayout(config.Storage.ExperimentalKeyLayout), store.WithDBKeyLayout(config.Storage.ExperimentalKeyLayout))
+	logger.Info("Blockstore version", "version", blockStore.GetVersion())
 
-	csMetrics, p2pMetrics, memplMetrics, smMetrics, abciMetrics, bsMetrics, ssMetrics := metricsProvider(genDoc.ChainID)
+	// The key will be deleted if it existed.
+	// Not checking whether the key is there in case the genesis file was larger than
+	// the max size of a value (in rocksDB for example), which would cause the check
+	// to fail and prevent the node from booting.
+	logger.Info("WARNING: deleting genesis file from database if present, the database stores a hash of the original genesis file now")
+
+	err = stateDB.Delete(genesisDocKey)
+	if err != nil {
+		logger.Error("Failed to delete genesis doc from DB ", err)
+	}
 
 	// Create the proxyApp and establish connections to the ABCI app (consensus, mempool, query).
 	proxyApp, err := createAndStartProxyAppConns(clientCreator, logger, abciMetrics)
@@ -374,8 +415,13 @@ func NewNodeWithContext(
 	// Create the handshaker, which calls RequestInfo, sets the AppVersion on the state,
 	// and replays any blocks as necessary to sync CometBFT with the app.
 	consensusLogger := logger.With("module", "consensus")
+
+	appInfoResponse, err := proxyApp.Query().Info(ctx, proxy.InfoRequest)
+	if err != nil {
+		return nil, fmt.Errorf("error calling ABCI Info method: %v", err)
+	}
 	if !stateSync {
-		if err := doHandshake(ctx, stateStore, state, blockStore, genDoc, eventBus, proxyApp, consensusLogger); err != nil {
+		if err := doHandshake(ctx, stateStore, state, blockStore, genDoc, eventBus, appInfoResponse, proxyApp, consensusLogger); err != nil {
 			return nil, err
 		}
 
@@ -384,37 +430,44 @@ func NewNodeWithContext(
 		// what happened during block replay).
 		state, err = stateStore.Load()
 		if err != nil {
-			return nil, fmt.Errorf("cannot load state: %w", err)
+			return nil, sm.ErrCannotLoadState{Err: err}
 		}
 	}
 
+	// Determine whether we should do block sync. This must happen after the handshake, since the
+	// app may modify the validator set, specifying ourself as the only validator.
+	blockSync := !onlyValidatorIsUs(state, localAddr)
+	waitSync := stateSync || blockSync
+
 	logNodeStartupInfo(state, pubKey, logger, consensusLogger)
 
-	// these bools might be a bit confusing, but here's the breakdown:
-	var (
-		// comet's spec initializes the node in BLOCKSYNC mode by default
-		// if not a single validator (eg local-only node) and not doing state sync first
-		enableBlockSync = !onlyValidatorIsUs(state, localAddr) && !stateSync
-
-		// consensus reactor should NOT be active (should be blocked waiting) unless state sync is finished,
-		// or blocksync is enabled. But in adaptive sync mode, we instantly UNBLOCK it!
-		consensusWaitForSync = stateSync || (enableBlockSync && !config.BlockSync.AdaptiveSync)
-
-		// mempool follows the same rules as the consensus reactor.
-		// RPC can accept and gossip mempool txs even if chain is not yet synced.
-		mempoolWaitForSync = stateSync || (enableBlockSync && !config.BlockSync.AdaptiveSync)
+	mempool, mempoolReactor := createMempoolAndMempoolReactor(
+		config,
+		proxyApp,
+		state,
+		waitSync,
+		memplMetrics,
+		logger,
+		appInfoResponse,
+		meter.SubMeter("mempool", metrics.Tag("svc", "mempool")),
 	)
-
-	if config.BlockSync.AdaptiveSync {
-		logger.Info("Adaptive sync (blocksync + consensus) is enabled!")
-	}
-
-	// create mempool with its reactor
-	mempool, mempoolReactor := createMempoolAndMempoolReactor(config, proxyApp, state, mempoolWaitForSync, memplMetrics, logger)
 
 	evidenceReactor, evidencePool, err := createEvidenceReactor(config, dbProvider, stateStore, blockStore, logger)
 	if err != nil {
 		return nil, err
+	}
+
+	pruner, err := createPruner(
+		config,
+		txIndexer,
+		blockIndexer,
+		stateStore,
+		blockStore,
+		smMetrics,
+		logger.With("module", "state"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pruner: %w", err)
 	}
 
 	// make block executor for consensus and blocksync reactors to execute blocks
@@ -425,8 +478,8 @@ func NewNodeWithContext(
 		mempool,
 		evidencePool,
 		blockStore,
+		sm.BlockExecutorWithPruner(pruner),
 		sm.BlockExecutorWithMetrics(smMetrics),
-		sm.BlockExecutorWithBlockTimeTolerance(config.Consensus.BlockTimeTolerance),
 	)
 
 	offlineStateSyncHeight := int64(0)
@@ -436,25 +489,16 @@ func NewNodeWithContext(
 			panic(fmt.Sprintf("failed to retrieve statesynced height from store %s; expected state store height to be %v", err, state.LastBlockHeight))
 		}
 	}
-
-	bcReactor, err := createBlocksyncReactor(
-		enableBlockSync,
-		config,
-		state,
-		blockExec,
-		blockStore,
-		localAddr,
-		offlineStateSyncHeight,
-		logger,
-		bsMetrics,
-	)
+	// Don't start block sync if we're doing a state sync first.
+	bcReactor, err := createBlocksyncReactor(config, state, blockExec, blockStore, blockSync && !stateSync, localAddr, logger, bsMetrics, offlineStateSyncHeight)
 	if err != nil {
 		return nil, fmt.Errorf("could not create blocksync reactor: %w", err)
 	}
 
 	consensusReactor, consensusState := createConsensusReactor(
 		config, state, blockExec, blockStore, mempool, evidencePool,
-		privValidator, csMetrics, consensusWaitForSync, eventBus, consensusLogger, offlineStateSyncHeight,
+		privValidator, csMetrics, waitSync, eventBus, consensusLogger, offlineStateSyncHeight,
+		meter.SubMeter("consensus", metrics.Tag("svc", "consensus")),
 	)
 
 	err = stateStore.SetOfflineStateSyncHeight(0)
@@ -470,109 +514,57 @@ func NewNodeWithContext(
 		proxyApp.Snapshot(),
 		proxyApp.Query(),
 		ssMetrics,
+		meter.SubMeter("statesync", metrics.Tag("svc", "statesync")),
 	)
 	stateSyncReactor.SetLogger(logger.With("module", "statesync"))
-
-	// true by default. Otherwise, uses libp2p
-	useCometNetworking := !config.P2P.LibP2PEnabled()
-
-	if config.P2P.PexReactor && !useCometNetworking {
-		config.P2P.PexReactor = false
-		logger.Info("PEX reactor is disabled when using go-libp2p transport")
-	}
 
 	nodeInfo, err := makeNodeInfo(config, nodeKey, txIndexer, genDoc, state)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		transport p2p.Transport
-		sw        p2p.Switcher
-		p2pLogger = logger.With("module", "p2p")
+	transport, peerFilters := createTransport(config, nodeInfo, nodeKey, proxyApp)
+
+	p2pLogger := logger.With("module", "p2p")
+	sw := createSwitch(
+		config, transport, p2pMetrics, peerFilters, mempoolReactor, bcReactor,
+		stateSyncReactor, consensusReactor, evidenceReactor, nodeInfo, nodeKey, p2pLogger,
 	)
 
-	// Comet P2P (default)
-	if useCometNetworking {
-		cometTransport, switcher := createCometTransportWithSwitch(
-			config,
-			nodeInfo,
-			nodeKey,
-			proxyApp,
-			mempoolReactor,
-			bcReactor,
-			stateSyncReactor,
-			consensusReactor,
-			evidenceReactor,
-			p2pMetrics,
-			p2pLogger,
-		)
-
-		err = switcher.AddPersistentPeers(splitAndTrimEmpty(config.P2P.PersistentPeers, ",", " "))
-		if err != nil {
-			return nil, fmt.Errorf("could not add peers from persistent_peers field: %w", err)
-		}
-
-		err = switcher.AddUnconditionalPeerIDs(splitAndTrimEmpty(config.P2P.UnconditionalPeerIDs, ",", " "))
-		if err != nil {
-			return nil, fmt.Errorf("could not add peer ids from unconditional_peer_ids field: %w", err)
-		}
-
-		addrBook, err := createAddrBookAndSetOnSwitch(config, switcher, p2pLogger, nodeKey)
-		if err != nil {
-			return nil, fmt.Errorf("could not create addrbook: %w", err)
-		}
-
-		// Optionally, start the pex reactor
-		//
-		// TODO:
-		//
-		// We need to set Seeds and PersistentPeers on the switch,
-		// since it needs to be able to use these (and their DNS names)
-		// even if the PEX is off. We can include the DNS name in the NetAddress,
-		// but it would still be nice to have a clear list of the current "PersistentPeers"
-		// somewhere that we can return with net_info.
-		//
-		// If PEX is on, it should handle dialing the seeds. Otherwise the switch does it.
-		// Note we currently use the addrBook regardless at least for AddOurAddress
-		if config.P2P.PexReactor {
-			_ = createPEXReactorAndAddToSwitch(addrBook, config, switcher, logger)
-		}
-
-		// Add private IDs to addrbook to block those peers being added
-		addrBook.AddPrivateIDs(splitAndTrimEmpty(config.P2P.PrivatePeerIDs, ",", " "))
-
-		transport = cometTransport
-		sw = switcher
-	} else {
-		reactors := []lp2p.SwitchReactor{
-			{Name: "MEMPOOL", Reactor: mempoolReactor},
-			{Name: "BLOCKSYNC", Reactor: bcReactor},
-			{Name: "CONSENSUS", Reactor: consensusReactor},
-			{Name: "EVIDENCE", Reactor: evidenceReactor},
-			{Name: "STATESYNC", Reactor: stateSyncReactor},
-		}
-
-		// drop mempool if nop
-		if config.Mempool.Type == cfg.MempoolTypeNop {
-			reactors = reactors[1:]
-		}
-
-		host, err := lp2p.NewHost(config.P2P, nodeKey.PrivKey, p2pLogger)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create libp2p host: %w", err)
-		}
-
-		sw, err = lp2p.NewSwitch(nodeInfo, host, reactors, p2pMetrics, p2pLogger)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create libp2p switch: %w", err)
-		}
-
-		p2pLogger.Info("Using libp2p transport", "host_id", host.ID().String())
-		if state.LastBlockHeight != 0 {
-			p2pLogger.Warn("EXPERIMENTAL: go-libp2p transport is enabled. Only enable this setting if it can be activated simultaneously for all validators on the network and peer IDs have been predetermined and exchanged.")
-		}
+	err = sw.AddPersistentPeers(splitAndTrimEmpty(config.P2P.PersistentPeers, ",", " "))
+	if err != nil {
+		return nil, fmt.Errorf("could not add peers from persistent_peers field: %w", err)
 	}
+
+	err = sw.AddUnconditionalPeerIDs(splitAndTrimEmpty(config.P2P.UnconditionalPeerIDs, ",", " "))
+	if err != nil {
+		return nil, fmt.Errorf("could not add peer ids from unconditional_peer_ids field: %w", err)
+	}
+
+	addrBook, err := createAddrBookAndSetOnSwitch(config, sw, p2pLogger, nodeKey)
+	if err != nil {
+		return nil, fmt.Errorf("could not create addrbook: %w", err)
+	}
+
+	// Optionally, start the pex reactor
+	//
+	// TODO:
+	//
+	// We need to set Seeds and PersistentPeers on the switch,
+	// since it needs to be able to use these (and their DNS names)
+	// even if the PEX is off. We can include the DNS name in the NetAddress,
+	// but it would still be nice to have a clear list of the current "PersistentPeers"
+	// somewhere that we can return with net_info.
+	//
+	// If PEX is on, it should handle dialing the seeds. Otherwise the switch does it.
+	// Note we currently use the addrBook regardless at least for AddOurAddress
+	var pexReactor *pex.Reactor
+	if config.P2P.PexReactor {
+		pexReactor = createPEXReactorAndAddToSwitch(addrBook, config, sw, logger)
+	}
+
+	// Add private IDs to addrbook to block those peers being added
+	addrBook.AddPrivateIDs(splitAndTrimEmpty(config.P2P.PrivatePeerIDs, ",", " "))
 
 	node := &Node{
 		config:        config,
@@ -581,12 +573,13 @@ func NewNodeWithContext(
 
 		transport: transport,
 		sw:        sw,
-
-		nodeInfo: nodeInfo,
-		nodeKey:  nodeKey,
+		addrBook:  addrBook,
+		nodeInfo:  nodeInfo,
+		nodeKey:   nodeKey,
 
 		stateStore:       stateStore,
 		blockStore:       blockStore,
+		pruner:           pruner,
 		bcReactor:        bcReactor,
 		mempoolReactor:   mempoolReactor,
 		mempool:          mempool,
@@ -595,14 +588,15 @@ func NewNodeWithContext(
 		stateSyncReactor: stateSyncReactor,
 		stateSync:        stateSync,
 		stateSyncGenesis: state, // Shouldn't be necessary, but need a way to pass the genesis state
+		pexReactor:       pexReactor,
 		evidencePool:     evidencePool,
 		proxyApp:         proxyApp,
 		txIndexer:        txIndexer,
 		indexerService:   indexerService,
 		blockIndexer:     blockIndexer,
 		eventBus:         eventBus,
+		meter:            meter,
 	}
-
 	node.BaseService = *service.NewBaseService(logger, "Node", node)
 
 	for _, option := range options {
@@ -646,20 +640,17 @@ func (n *Node) OnStart() error {
 	if err != nil {
 		return err
 	}
-
-	if mp, ok := n.transport.(*p2p.MultiplexTransport); ok {
-		if err := mp.Listen(*addr); err != nil {
-			return err
-		}
+	if err := n.transport.Listen(*addr); err != nil {
+		return err
 	}
+
+	n.isListening = true
 
 	// Start the switch (the P2P server).
 	err = n.sw.Start()
 	if err != nil {
 		return err
 	}
-
-	n.isListening = true
 
 	// Always connect to persistent peers
 	err = n.sw.DialPeersAsync(splitAndTrimEmpty(n.config.P2P.PersistentPeers, ",", " "))
@@ -669,9 +660,20 @@ func (n *Node) OnStart() error {
 
 	// Run state sync
 	if n.stateSync {
-		if err := n.performStateSync(); err != nil {
+		bcR, ok := n.bcReactor.(blockSyncReactor)
+		if !ok {
+			return errors.New("this blocksync reactor does not support switching from state sync")
+		}
+		err := startStateSync(n.stateSyncReactor, bcR, n.stateSyncProvider,
+			n.config.StateSync, n.stateStore, n.blockStore, n.stateSyncGenesis, n.config.Storage.ExperimentalKeyLayout)
+		if err != nil {
 			return fmt.Errorf("failed to start state sync: %w", err)
 		}
+	}
+
+	// Start background pruning
+	if err := n.pruner.Start(); err != nil {
+		return fmt.Errorf("failed to start background pruning routine: %w", err)
 	}
 
 	return nil
@@ -684,6 +686,9 @@ func (n *Node) OnStop() {
 	n.Logger.Info("Stopping Node")
 
 	// first stop the non-reactor services
+	if err := n.pruner.Stop(); err != nil {
+		n.Logger.Error("Error stopping the pruning service", "err", err)
+	}
 	if err := n.eventBus.Stop(); err != nil {
 		n.Logger.Error("Error closing eventBus", "err", err)
 	}
@@ -697,10 +702,8 @@ func (n *Node) OnStop() {
 		n.Logger.Error("Error closing switch", "err", err)
 	}
 
-	if mp, ok := n.transport.(*p2p.MultiplexTransport); ok {
-		if err := mp.Close(); err != nil {
-			n.Logger.Error("Error closing transport", "err", err)
-		}
+	if err := n.transport.Close(); err != nil {
+		n.Logger.Error("Error closing transport", "err", err)
 	}
 
 	n.isListening = false
@@ -775,7 +778,6 @@ func (n *Node) ConfigureRPC() (*rpccore.Environment, error) {
 		MempoolReactor:   n.mempoolReactor,
 		EventBus:         n.eventBus,
 		Mempool:          n.mempool,
-		IsAdaptiveSync:   n.config.BlockSync.AdaptiveSync,
 
 		Logger: n.Logger.With("module", "rpc"),
 
@@ -813,21 +815,8 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 	}
 
 	// we may expose the rpc over both a unix and tcp socket
-	listeners := make([]net.Listener, len(listenAddrs))
-	var ok bool
-	defer func() {
-		if ok {
-			return
-		}
-		for _, l := range listeners {
-			if l != nil {
-				if err := l.Close(); err != nil {
-					n.Logger.Error("error closing rpc listener during startRPC cleanup", "err", err)
-				}
-			}
-		}
-	}()
-	for i, listenAddr := range listenAddrs {
+	listeners := make([]net.Listener, 0, len(listenAddrs))
+	for _, listenAddr := range listenAddrs {
 		mux := http.NewServeMux()
 		rpcLogger := n.Logger.With("module", "rpc-server")
 		wmLogger := rpcLogger.With("protocol", "websocket")
@@ -843,6 +832,7 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 		)
 		wm.SetLogger(wmLogger)
 		mux.HandleFunc("/websocket", wm.WebsocketHandler)
+		mux.HandleFunc("/v1/websocket", wm.WebsocketHandler)
 		rpcserver.RegisterRPCFuncs(mux, routes, rpcLogger)
 		listener, err := rpcserver.Listen(
 			listenAddr,
@@ -887,38 +877,53 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 			}()
 		}
 
-		listeners[i] = listener
+		listeners = append(listeners, listener)
 	}
 
-	// we expose a simplified api over grpc for convenience to app devs
-	grpcListenAddr := n.config.RPC.GRPCListenAddress
-	if grpcListenAddr != "" {
-		config := rpcserver.DefaultConfig()
-		config.MaxBodyBytes = n.config.RPC.MaxBodyBytes
-		config.MaxHeaderBytes = n.config.RPC.MaxHeaderBytes
-		// NOTE: GRPCMaxOpenConnections is used, not MaxOpenConnections
-		config.MaxOpenConnections = n.config.RPC.GRPCMaxOpenConnections
-		// If necessary adjust global WriteTimeout to ensure it's greater than
-		// TimeoutBroadcastTxCommit.
-		// See https://github.com/tendermint/tendermint/issues/3435
-		if config.WriteTimeout <= n.config.RPC.TimeoutBroadcastTxCommit {
-			config.WriteTimeout = n.config.RPC.TimeoutBroadcastTxCommit + 1*time.Second
-		}
-		listener, err := rpcserver.Listen(grpcListenAddr, config.MaxOpenConnections)
+	if n.config.GRPC.ListenAddress != "" {
+		listener, err := grpcserver.Listen(n.config.GRPC.ListenAddress)
 		if err != nil {
 			return nil, err
 		}
+		opts := []grpcserver.Option{
+			grpcserver.WithLogger(n.Logger),
+		}
+		if n.config.GRPC.VersionService.Enabled {
+			opts = append(opts, grpcserver.WithVersionService())
+		}
+		if n.config.GRPC.BlockService.Enabled {
+			opts = append(opts, grpcserver.WithBlockService(n.blockStore, n.eventBus, n.Logger))
+		}
+		if n.config.GRPC.BlockResultsService.Enabled {
+			opts = append(opts, grpcserver.WithBlockResultsService(n.blockStore, n.stateStore, n.Logger))
+		}
 		go func() {
-			//nolint:staticcheck // SA1019: core_grpc.StartGRPCClient is deprecated: A new gRPC API will be introduced after v0.38.
-			if err := grpccore.StartGRPCServer(env, listener); err != nil {
+			if err := grpcserver.Serve(listener, opts...); err != nil {
 				n.Logger.Error("Error starting gRPC server", "err", err)
 			}
 		}()
 		listeners = append(listeners, listener)
-
 	}
 
-	ok = true
+	if n.config.GRPC.Privileged.ListenAddress != "" {
+		listener, err := grpcserver.Listen(n.config.GRPC.Privileged.ListenAddress)
+		if err != nil {
+			return nil, err
+		}
+		opts := []grpcprivserver.Option{
+			grpcprivserver.WithLogger(n.Logger),
+		}
+		if n.config.GRPC.Privileged.PruningService.Enabled {
+			opts = append(opts, grpcprivserver.WithPruningService(n.pruner, n.Logger))
+		}
+		go func() {
+			if err := grpcprivserver.Serve(listener, opts...); err != nil {
+				n.Logger.Error("Error starting privileged gRPC server", "err", err)
+			}
+		}()
+		listeners = append(listeners, listener)
+	}
+
 	return listeners, nil
 }
 
@@ -944,7 +949,7 @@ func (n *Node) startPrometheusServer() *http.Server {
 	return srv
 }
 
-// starts a ppro
+// starts a ppro.
 func (n *Node) startPprofServer() *http.Server {
 	srv := &http.Server{
 		Addr:              n.config.RPC.PprofListenAddress,
@@ -961,7 +966,7 @@ func (n *Node) startPprofServer() *http.Server {
 }
 
 // Switch returns the Node's Switch.
-func (n *Node) Switch() p2p.Switcher {
+func (n *Node) Switch() *p2p.Switch {
 	return n.sw
 }
 
@@ -983,6 +988,11 @@ func (n *Node) MempoolReactor() p2p.Reactor {
 // Mempool returns the Node's mempool.
 func (n *Node) Mempool() mempl.Mempool {
 	return n.mempool
+}
+
+// PEXReactor returns the Node's PEXReactor. It returns nil if PEX is disabled.
+func (n *Node) PEXReactor() *pex.Reactor {
+	return n.pexReactor
 }
 
 // EvidencePool returns the Node's EvidencePool.
@@ -1016,7 +1026,7 @@ func (n *Node) Config() *cfg.Config {
 	return n.config
 }
 
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 
 func (n *Node) Listeners() []string {
 	return []string{
@@ -1053,11 +1063,11 @@ func makeNodeInfo(
 		),
 		DefaultNodeID: nodeKey.ID(),
 		Network:       genDoc.ChainID,
-		Version:       version.TMCoreSemVer,
+		Version:       version.CMTSemVer,
 		Channels: []byte{
 			bc.BlocksyncChannel,
 			cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
-			mempl.MempoolChannel,
+			mempl.MempoolChannel, mempl.MempoolControlChannel,
 			evidence.EvidenceChannel,
 			statesync.SnapshotChannel, statesync.ChunkChannel,
 		},
@@ -1082,4 +1092,76 @@ func makeNodeInfo(
 
 	err := nodeInfo.Validate()
 	return nodeInfo, err
+}
+
+func createPruner(
+	config *cfg.Config,
+	txIndexer txindex.TxIndexer,
+	blockIndexer indexer.BlockIndexer,
+	stateStore sm.Store,
+	blockStore *store.BlockStore,
+	metrics *sm.Metrics,
+	logger log.Logger,
+) (*sm.Pruner, error) {
+	if err := initApplicationRetainHeight(stateStore); err != nil {
+		return nil, err
+	}
+
+	prunerOpts := []sm.PrunerOption{
+		sm.WithPrunerInterval(config.Storage.Pruning.Interval),
+		sm.WithPrunerMetrics(metrics),
+	}
+
+	if config.Storage.Pruning.DataCompanion.Enabled {
+		err := initCompanionRetainHeights(
+			stateStore,
+			config.Storage.Pruning.DataCompanion.InitialBlockRetainHeight,
+			config.Storage.Pruning.DataCompanion.InitialBlockResultsRetainHeight,
+		)
+		if err != nil {
+			return nil, err
+		}
+		prunerOpts = append(prunerOpts, sm.WithPrunerCompanionEnabled())
+	}
+
+	return sm.NewPruner(stateStore, blockStore, blockIndexer, txIndexer, logger, prunerOpts...), nil
+}
+
+// Set the initial application retain height to 0 to avoid the data companion
+// pruning blocks before the application indicates it is OK. We set this to 0
+// only if the retain height was not set before by the application.
+func initApplicationRetainHeight(stateStore sm.Store) error {
+	if _, err := stateStore.GetApplicationRetainHeight(); err != nil {
+		if errors.Is(err, sm.ErrKeyNotFound) {
+			return stateStore.SaveApplicationRetainHeight(0)
+		}
+		return err
+	}
+	return nil
+}
+
+// Sets the data companion retain heights if one of two possible conditions is
+// met:
+// 1. One or more of the retain heights has not yet been set.
+// 2. One or more of the retain heights is currently 0.
+func initCompanionRetainHeights(stateStore sm.Store, initBlockRH, initBlockResultsRH int64) error {
+	curBlockRH, err := stateStore.GetCompanionBlockRetainHeight()
+	if err != nil && !errors.Is(err, sm.ErrKeyNotFound) {
+		return fmt.Errorf("failed to obtain companion block retain height: %w", err)
+	}
+	if curBlockRH == 0 {
+		if err := stateStore.SaveCompanionBlockRetainHeight(initBlockRH); err != nil {
+			return fmt.Errorf("failed to set initial data companion block retain height: %w", err)
+		}
+	}
+	curBlockResultsRH, err := stateStore.GetABCIResRetainHeight()
+	if err != nil && !errors.Is(err, sm.ErrKeyNotFound) {
+		return fmt.Errorf("failed to obtain companion block results retain height: %w", err)
+	}
+	if curBlockResultsRH == 0 {
+		if err := stateStore.SaveABCIResRetainHeight(initBlockResultsRH); err != nil {
+			return fmt.Errorf("failed to set initial data companion block results retain height: %w", err)
+		}
+	}
+	return nil
 }

@@ -8,14 +8,15 @@ import (
 	"github.com/cometbft/cometbft/libs/log"
 	rpctypes "github.com/cometbft/cometbft/rpc/core/types"
 	e2e "github.com/cometbft/cometbft/test/e2e/pkg"
+	"github.com/cometbft/cometbft/test/e2e/pkg/infra"
 	"github.com/cometbft/cometbft/test/e2e/pkg/infra/docker"
 )
 
 // Perturbs a running testnet.
-func Perturb(ctx context.Context, testnet *e2e.Testnet) error {
+func Perturb(ctx context.Context, testnet *e2e.Testnet, ifp infra.Provider) error {
 	for _, node := range testnet.Nodes {
 		for _, perturbation := range node.Perturbations {
-			_, err := PerturbNode(ctx, node, perturbation)
+			_, err := PerturbNode(ctx, node, perturbation, ifp)
 			if err != nil {
 				return err
 			}
@@ -27,30 +28,29 @@ func Perturb(ctx context.Context, testnet *e2e.Testnet) error {
 
 // PerturbNode perturbs a node with a given perturbation, returning its status
 // after recovering.
-func PerturbNode(ctx context.Context, node *e2e.Node, perturbation e2e.Perturbation) (*rpctypes.ResultStatus, error) {
+func PerturbNode(ctx context.Context, node *e2e.Node, perturbation e2e.Perturbation, ifp infra.Provider) (*rpctypes.ResultStatus, error) {
 	testnet := node.Testnet
-	out, err := docker.ExecComposeOutput(context.Background(), testnet.Dir, "ps", "-q", node.Name)
+
+	name, upgraded, err := ifp.CheckUpgraded(ctx, node)
 	if err != nil {
 		return nil, err
 	}
-	name := node.Name
-	upgraded := false
-	if len(out) == 0 {
-		name += "_u"
-		upgraded = true
+	if upgraded {
 		logger.Info("perturb node", "msg",
 			log.NewLazySprintf("Node %v already upgraded, operating on alternate container %v",
 				node.Name, name))
 	}
 
+	timeout := 20 * time.Second
+
 	switch perturbation {
 	case e2e.PerturbationDisconnect:
 		logger.Info("perturb node", "msg", log.NewLazySprintf("Disconnecting node %v...", node.Name))
-		if err := docker.Exec(context.Background(), "network", "disconnect", testnet.Name+"_"+testnet.Name, name); err != nil {
+		if err := ifp.Disconnect(context.Background(), name, node.ExternalIP.String()); err != nil {
 			return nil, err
 		}
 		time.Sleep(10 * time.Second)
-		if err := docker.Exec(context.Background(), "network", "connect", testnet.Name+"_"+testnet.Name, name); err != nil {
+		if err := ifp.Reconnect(context.Background(), name, node.ExternalIP.String()); err != nil {
 			return nil, err
 		}
 
@@ -61,6 +61,13 @@ func PerturbNode(ctx context.Context, node *e2e.Node, perturbation e2e.Perturbat
 		}
 		if err := docker.ExecCompose(context.Background(), testnet.Dir, "start", name); err != nil {
 			return nil, err
+		}
+		if node.PersistInterval == 0 {
+			timeout *= 5
+		} else {
+			// still need to give some extra time to the runner
+			// to wait for the node to restart when killing
+			timeout *= 2
 		}
 
 	case e2e.PerturbationPause:
@@ -77,6 +84,9 @@ func PerturbNode(ctx context.Context, node *e2e.Node, perturbation e2e.Perturbat
 		logger.Info("perturb node", "msg", log.NewLazySprintf("Restarting node %v...", node.Name))
 		if err := docker.ExecCompose(context.Background(), testnet.Dir, "restart", name); err != nil {
 			return nil, err
+		}
+		if node.PersistInterval == 0 {
+			timeout *= 5
 		}
 
 	case e2e.PerturbationUpgrade:
@@ -103,12 +113,15 @@ func PerturbNode(ctx context.Context, node *e2e.Node, perturbation e2e.Perturbat
 		if err := docker.ExecCompose(context.Background(), testnet.Dir, "up", "-d", name+"_u"); err != nil {
 			return nil, err
 		}
+		if node.PersistInterval == 0 {
+			timeout *= 5
+		}
 
 	default:
 		return nil, fmt.Errorf("unexpected perturbation %q", perturbation)
 	}
 
-	status, err := waitForNode(ctx, node, 0, 20*time.Second)
+	status, err := waitForNode(ctx, node, 0, timeout)
 	if err != nil {
 		return nil, err
 	}

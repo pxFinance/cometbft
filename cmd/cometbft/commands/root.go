@@ -27,7 +27,7 @@ func registerFlagsRootCmd(cmd *cobra.Command) {
 }
 
 // ParseConfig retrieves the default environment configuration,
-// sets up the CometBFT root and ensures that the root exists
+// sets up the CometBFT root and ensures that the root exists.
 func ParseConfig(cmd *cobra.Command) (*cfg.Config, error) {
 	conf := cfg.DefaultConfig()
 	err := viper.Unmarshal(conf)
@@ -36,21 +36,14 @@ func ParseConfig(cmd *cobra.Command) (*cfg.Config, error) {
 	}
 
 	var home string
-
-	cmtHome := os.Getenv("CMTHOME")
-	tmHome := os.Getenv("TMHOME")
-
 	switch {
-	case cmtHome != "":
-		home = cmtHome
-
-	case tmHome != "":
+	case os.Getenv("CMTHOME") != "":
+		home = os.Getenv("CMTHOME")
+	case os.Getenv("TMHOME") != "":
 		// XXX: Deprecated.
-		home = tmHome
+		home = os.Getenv("TMHOME")
 		logger.Error("Deprecated environment variable TMHOME identified. CMTHOME should be used instead.")
-
 	default:
-		var err error
 		home, err = cmd.Flags().GetString(cli.HomeFlag)
 		if err != nil {
 			return nil, err
@@ -76,7 +69,7 @@ func ParseConfig(cmd *cobra.Command) (*cfg.Config, error) {
 var RootCmd = &cobra.Command{
 	Use:   "cometbft",
 	Short: "BFT state machine replication for applications in any programming languages",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
 		if cmd.Name() == VersionCmd.Name() {
 			return nil
 		}
@@ -84,6 +77,10 @@ var RootCmd = &cobra.Command{
 		config, err = ParseConfig(cmd)
 		if err != nil {
 			return err
+		}
+
+		for _, possibleMisconfiguration := range config.PossibleMisconfigurations() {
+			logger.Info(possibleMisconfiguration)
 		}
 
 		if config.LogFormat == cfg.LogFormatJSON {

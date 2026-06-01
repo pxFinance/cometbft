@@ -3,6 +3,7 @@ package types
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/libs/log"
@@ -115,13 +116,13 @@ func (*EventBus) validateAndStringifyEvents(events []types.Event) map[string][]s
 		if len(event.Type) == 0 {
 			continue
 		}
-		prefix := event.Type + "."
+
 		for _, attr := range event.Attributes {
 			if len(attr.Key) == 0 {
 				continue
 			}
 
-			compositeTag := prefix + attr.Key
+			compositeTag := fmt.Sprintf("%s.%s", event.Type, attr.Key)
 			result[compositeTag] = append(result[compositeTag], attr.Value)
 		}
 	}
@@ -180,7 +181,7 @@ func (b *EventBus) PublishEventTx(data EventDataTx) error {
 	// add predefined compositeKeys
 	events[EventTypeKey] = append(events[EventTypeKey], EventTx)
 	events[TxHashKey] = append(events[TxHashKey], fmt.Sprintf("%X", Tx(data.Tx).Hash()))
-	events[TxHeightKey] = append(events[TxHeightKey], fmt.Sprintf("%d", data.Height))
+	events[TxHeightKey] = append(events[TxHeightKey], strconv.FormatInt(data.Height, 10))
 
 	return b.pubsub.PublishWithEvents(ctx, data, events)
 }
@@ -209,10 +210,6 @@ func (b *EventBus) PublishEventPolka(data EventDataRoundState) error {
 	return b.Publish(EventPolka, data)
 }
 
-func (b *EventBus) PublishEventUnlock(data EventDataRoundState) error {
-	return b.Publish(EventUnlock, data)
-}
-
 func (b *EventBus) PublishEventRelock(data EventDataRoundState) error {
 	return b.Publish(EventRelock, data)
 }
@@ -225,7 +222,7 @@ func (b *EventBus) PublishEventValidatorSetUpdates(data EventDataValidatorSetUpd
 	return b.Publish(EventValidatorSetUpdates, data)
 }
 
-// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------.
 type NopEventBus struct{}
 
 func (NopEventBus) Subscribe(
@@ -290,10 +287,6 @@ func (NopEventBus) PublishEventCompleteProposal(EventDataRoundState) error {
 }
 
 func (NopEventBus) PublishEventPolka(EventDataRoundState) error {
-	return nil
-}
-
-func (NopEventBus) PublishEventUnlock(EventDataRoundState) error {
 	return nil
 }
 

@@ -5,7 +5,7 @@ you can report it to our primary vulnerability disclosure channel, the [Cosmos
 HackerOne Bug Bounty program][h1].
 
 If you prefer to report an issue via email, you may send a bug report to
-<security@cosmoslabs.io> with the issue details, reproduction, impact, and other
+<security@interchain.io> with the issue details, reproduction, impact, and other
 information. Please submit only one unique email thread per vulnerability. Any
 issues reported via email are ineligible for bounty rewards.
 
@@ -28,10 +28,6 @@ Disclosure policy and Safe Harbor for the Interchain Stack, and the teams and
 infrastructure it supports, and it supersedes previous security policies that
 have been used in the past by individual teams and projects with targets in
 scope of the program.
-
-### More information
-
-* See [Maintenance and Security](https://github.com/cosmos/security) for detailed policies.
 
 [h1]: https://hackerone.com/cosmos?type=team
 [h1-policy]: https://hackerone.com/cosmos?type=team&view_policy=true

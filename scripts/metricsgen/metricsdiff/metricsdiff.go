@@ -15,7 +15,6 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 )
 
 func init() {
@@ -65,23 +64,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("Open: %v", err)
 	}
-	defer fa.Close()
 	fb, err := os.Open(flag.Arg(1))
 	if err != nil {
-		log.Fatalf("Open: %v", err) //nolint:gocritic
+		log.Fatalf("Open: %v", err)
 	}
-	defer fb.Close()
 	md, err := DiffFromReaders(fa, fb)
 	if err != nil {
 		log.Fatalf("Generating diff: %v", err)
 	}
+	fa.Close()
+	fb.Close()
 	fmt.Print(md)
 }
 
 // DiffFromReaders parses the metrics present in the readers a and b and
 // determines which metrics were added and removed in b.
 func DiffFromReaders(a, b io.Reader) (Diff, error) {
-	parser := expfmt.NewTextParser(model.LegacyValidation)
+	var parser expfmt.TextParser
 	amf, err := parser.TextToMetricFamilies(a)
 	if err != nil {
 		return Diff{}, err
@@ -127,7 +126,7 @@ func toList(l map[string]*dto.MetricFamily) metricsList {
 	for name, family := range l {
 		r[idx] = parsedMetric{
 			name:   name,
-			labels: labelsToStringList(family.Metric[0].Label),
+			labels: labelsToStringList(family.GetMetric()[0].GetLabel()),
 		}
 		idx++
 	}

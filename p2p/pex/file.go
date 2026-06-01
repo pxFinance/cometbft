@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cometbft/cometbft/libs/tempfile"
+	"github.com/cometbft/cometbft/internal/tempfile"
 )
 
 /* Loading & Saving */

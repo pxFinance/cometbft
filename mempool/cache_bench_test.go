@@ -2,7 +2,6 @@ package mempool
 
 import (
 	"encoding/binary"
-	"sync/atomic"
 	"testing"
 )
 
@@ -22,6 +21,8 @@ func BenchmarkCacheInsertTime(b *testing.B) {
 	}
 }
 
+// This benchmark is probably skewed, since we actually will be removing
+// txs in parallel, which may cause some overhead due to mutex locking.
 func BenchmarkCacheRemoveTime(b *testing.B) {
 	cache := NewLRUTxCache(b.N)
 
@@ -34,11 +35,7 @@ func BenchmarkCacheRemoveTime(b *testing.B) {
 
 	b.ResetTimer()
 
-	var idx int64
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			currIdx := atomic.AddInt64(&idx, 1) - 1
-			cache.Remove(txs[currIdx%int64(b.N)])
-		}
-	})
+	for i := 0; i < b.N; i++ {
+		cache.Remove(txs[i])
+	}
 }

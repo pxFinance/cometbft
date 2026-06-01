@@ -12,7 +12,7 @@ import (
 
 // Status returns CometBFT status including node info, pubkey, latest block
 // hash, app hash, block height and time.
-// More: https://docs.cometbft.com/v0.38/spec/rpc/#status
+// More: https://docs.cometbft.com/main/rpc/#/Info/status
 func (env *Environment) Status(*rpctypes.Context) (*ctypes.ResultStatus, error) {
 	var (
 		earliestBlockHeight   int64
@@ -51,9 +51,7 @@ func (env *Environment) Status(*rpctypes.Context) (*ctypes.ResultStatus, error) 
 		votingPower = val.VotingPower
 	}
 
-	catchingUp := env.ConsensusReactor.WaitSync()
-
-	return &ctypes.ResultStatus{
+	result := &ctypes.ResultStatus{
 		NodeInfo: env.P2PTransport.NodeInfo().(p2p.DefaultNodeInfo),
 		SyncInfo: ctypes.SyncInfo{
 			LatestBlockHash:     latestBlockHash,
@@ -64,14 +62,16 @@ func (env *Environment) Status(*rpctypes.Context) (*ctypes.ResultStatus, error) 
 			EarliestAppHash:     earliestAppHash,
 			EarliestBlockHeight: earliestBlockHeight,
 			EarliestBlockTime:   time.Unix(0, earliestBlockTimeNano),
-			CatchingUp:          catchingUp,
+			CatchingUp:          env.ConsensusReactor.WaitSync(),
 		},
 		ValidatorInfo: ctypes.ValidatorInfo{
 			Address:     env.PubKey.Address(),
 			PubKey:      env.PubKey,
 			VotingPower: votingPower,
 		},
-	}, nil
+	}
+
+	return result, nil
 }
 
 func (env *Environment) validatorAtHeight(h int64) *types.Validator {

@@ -3,6 +3,7 @@ package mempool
 import (
 	"errors"
 
+	abcicli "github.com/cometbft/cometbft/abci/client"
 	abci "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/libs/service"
 	"github.com/cometbft/cometbft/p2p"
@@ -21,8 +22,8 @@ var errNotAllowed = errors.New("not allowed with `nop` mempool")
 var _ Mempool = &NopMempool{}
 
 // CheckTx always returns an error.
-func (*NopMempool) CheckTx(types.Tx, func(*abci.ResponseCheckTx), TxInfo) error {
-	return errNotAllowed
+func (*NopMempool) CheckTx(types.Tx, p2p.ID) (*abcicli.ReqRes, error) {
+	return nil, errNotAllowed
 }
 
 // RemoveTxByKey always returns an error.
@@ -34,11 +35,16 @@ func (*NopMempool) ReapMaxBytesMaxGas(int64, int64) types.Txs { return nil }
 // ReapMaxTxs always returns nil.
 func (*NopMempool) ReapMaxTxs(int) types.Txs { return nil }
 
+// GetTxByHash always returns nil.
+func (*NopMempool) GetTxByHash([]byte) types.Tx { return nil }
+
 // Lock does nothing.
 func (*NopMempool) Lock() {}
 
 // Unlock does nothing.
 func (*NopMempool) Unlock() {}
+
+func (*NopMempool) PreUpdate() {}
 
 // Update does nothing.
 func (*NopMempool) Update(
@@ -57,6 +63,9 @@ func (*NopMempool) FlushAppConn() error { return nil }
 // Flush does nothing.
 func (*NopMempool) Flush() {}
 
+// Contains always returns false.
+func (*NopMempool) Contains(types.TxKey) bool { return false }
+
 // TxsAvailable always returns nil.
 func (*NopMempool) TxsAvailable() <-chan struct{} {
 	return nil
@@ -65,14 +74,14 @@ func (*NopMempool) TxsAvailable() <-chan struct{} {
 // EnableTxsAvailable does nothing.
 func (*NopMempool) EnableTxsAvailable() {}
 
-// SetTxRemovedCallback does nothing.
-func (*NopMempool) SetTxRemovedCallback(func(txKey types.TxKey)) {}
-
 // Size always returns 0.
 func (*NopMempool) Size() int { return 0 }
 
 // SizeBytes always returns 0.
 func (*NopMempool) SizeBytes() int64 { return 0 }
+
+// GetSenders always returns nil.
+func (*NopMempool) GetSenders(_ types.TxKey) ([]p2p.ID, error) { return nil, nil }
 
 // NopMempoolReactor is a mempool reactor that does nothing.
 type NopMempoolReactor struct {
@@ -88,7 +97,7 @@ func NewNopMempoolReactor() *NopMempoolReactor {
 
 var _ p2p.Reactor = &NopMempoolReactor{}
 
-// WaitSync always returns false
+// WaitSync always returns false.
 func (*NopMempoolReactor) WaitSync() bool { return false }
 
 // GetChannels always returns nil.
@@ -107,4 +116,4 @@ func (*NopMempoolReactor) RemovePeer(p2p.Peer, any) {}
 func (*NopMempoolReactor) Receive(p2p.Envelope) {}
 
 // SetSwitch does nothing.
-func (*NopMempoolReactor) SetSwitch(p2p.Switcher) {}
+func (*NopMempoolReactor) SetSwitch(*p2p.Switch) {}

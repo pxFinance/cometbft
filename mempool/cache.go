@@ -63,9 +63,10 @@ func (c *LRUTxCache) Reset() {
 }
 
 func (c *LRUTxCache) Push(tx types.Tx) bool {
-	key := tx.Key()
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+
+	key := tx.Key()
 
 	moved, ok := c.cacheMap[key]
 	if ok {
@@ -89,12 +90,14 @@ func (c *LRUTxCache) Push(tx types.Tx) bool {
 }
 
 func (c *LRUTxCache) Remove(tx types.Tx) {
-	key := tx.Key()
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
-	if e, ok := c.cacheMap[key]; ok {
-		delete(c.cacheMap, key)
+	key := tx.Key()
+	e := c.cacheMap[key]
+	delete(c.cacheMap, key)
+
+	if e != nil {
 		c.list.Remove(e)
 	}
 }

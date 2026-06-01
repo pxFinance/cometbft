@@ -41,7 +41,7 @@ include details of the private keys beyond their type and name.
 
 ### Key Types
 
-Each type specifies its own pubkey, address, and signature format.
+Each type specifies it's own pubkey, address, and signature format.
 
 #### Ed25519
 
@@ -199,7 +199,7 @@ func getSplitPoint(k int) { ... }
 func MerkleRoot(items [][]byte) []byte{
  switch len(items) {
  case 0:
-  return emptyHash()
+  return empthHash()
  case 1:
   return leafHash(items[0])
  default:

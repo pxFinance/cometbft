@@ -6,55 +6,52 @@ title: Requirements for the Application
 # Requirements for the Application
 
 - [Requirements for the Application](#requirements-for-the-application)
-  - [Formal Requirements](#formal-requirements)
-    - [Consensus Connection Requirements](#consensus-connection-requirements)
-    - [Mempool Connection Requirements](#mempool-connection-requirements)
-  - [Managing the Application state and related topics](#managing-the-application-state-and-related-topics)
-    - [Connection State](#connection-state)
-      - [Concurrency](#concurrency)
-      - [FinalizeBlock](#finalizeblock)
-      - [Commit](#commit)
-      - [Candidate States](#candidate-states)
-    - [States and ABCI Connections](#states-and-abci-connections)
-      - [Consensus Connection](#consensus-connection)
-      - [Mempool Connection](#mempool-connection)
-        - [Replay Protection](#replay-protection)
-      - [Info/Query Connection](#infoquery-connection)
-      - [Snapshot Connection](#snapshot-connection)
-    - [Transaction Results](#transaction-results)
-      - [Gas](#gas)
-      - [Specifics of `CheckTxResponse`](#specifics-of-checktxresponse)
-      - [Specifics of `ExecTxResult`](#specifics-of-exectxresult)
-    - [Updating the Validator Set](#updating-the-validator-set)
-    - [Consensus Parameters](#consensus-parameters)
-      - [List of Parameters](#list-of-parameters)
-        - [BlockParams.MaxBytes](#blockparamsmaxbytes)
-        - [BlockParams.MaxGas](#blockparamsmaxgas)
-        - [EvidenceParams.MaxAgeDuration](#evidenceparamsmaxageduration)
-        - [EvidenceParams.MaxAgeNumBlocks](#evidenceparamsmaxagenumblocks)
-        - [EvidenceParams.MaxBytes](#evidenceparamsmaxbytes)
-        - [FeatureParams.PbtsEnableHeight](#featureparamspbtsenableheight)
-        - [FeatureParams.VoteExtensionsEnableHeight](#featureparamsvoteextensionsenableheight)
-        - [ValidatorParams.PubKeyTypes](#validatorparamspubkeytypes)
-        - [VersionParams.App](#versionparamsapp)
-        - [SynchronyParams.Precision](#synchronyparamsprecision)
-        - [SynchronyParams.MessageDelay](#synchronyparamsmessagedelay)
-      - [Updating Consensus Parameters](#updating-consensus-parameters)
-        - [`InitChain`](#initchain)
-        - [`FinalizeBlock`, `PrepareProposal`/`ProcessProposal`](#finalizeblock-prepareproposalprocessproposal)
-    - [`Query`](#query)
-      - [Query Proofs](#query-proofs)
-      - [Peer Filtering](#peer-filtering)
-      - [Paths](#paths)
-    - [Crash Recovery](#crash-recovery)
-    - [State Sync](#state-sync)
-      - [Taking Snapshots](#taking-snapshots)
-      - [Bootstrapping a Node](#bootstrapping-a-node)
-        - [Snapshot Discovery](#snapshot-discovery)
-        - [Snapshot Restoration](#snapshot-restoration)
-        - [Snapshot Verification](#snapshot-verification)
-        - [Transition to Consensus](#transition-to-consensus)
-  - [Application configuration required to switch to ABCI 2.0](#application-configuration-required-to-switch-to-abci-20)
+    - [Formal Requirements](#formal-requirements)
+        - [Consensus Connection Requirements](#consensus-connection-requirements)
+        - [Mempool Connection Requirements](#mempool-connection-requirements)
+    - [Managing the Application state and related topics](#managing-the-application-state-and-related-topics)
+        - [Connection State](#connection-state)
+            - [Concurrency](#concurrency)
+            - [FinalizeBlock](#finalizeblock)
+            - [Commit](#commit)
+            - [Candidate States](#candidate-states)
+        - [States and ABCI Connections](#states-and-abci-connections)
+            - [Consensus Connection](#consensus-connection)
+            - [Mempool Connection](#mempool-connection)
+                - [Replay Protection](#replay-protection)
+            - [Info/Query Connection](#infoquery-connection)
+            - [Snapshot Connection](#snapshot-connection)
+        - [Transaction Results](#transaction-results)
+            - [Gas](#gas)
+            - [Specifics of `CheckTxResponse`](#specifics-of-checktxresponse)
+            - [Specifics of `ExecTxResult`](#specifics-of-exectxresult)
+        - [Updating the Validator Set](#updating-the-validator-set)
+        - [Consensus Parameters](#consensus-parameters)
+            - [List of Parameters](#list-of-parameters)
+                - [BlockParams.MaxBytes](#blockparamsmaxbytes)
+                - [BlockParams.MaxGas](#blockparamsmaxgas)
+                - [EvidenceParams.MaxAgeDuration](#evidenceparamsmaxageduration)
+                - [EvidenceParams.MaxAgeNumBlocks](#evidenceparamsmaxagenumblocks)
+                - [EvidenceParams.MaxBytes](#evidenceparamsmaxbytes)
+                - [ValidatorParams.PubKeyTypes](#validatorparamspubkeytypes)
+                - [VersionParams.App](#versionparamsapp)
+                - [ABCIParams.VoteExtensionsEnableHeight](#abciparamsvoteextensionsenableheight)
+            - [Updating Consensus Parameters](#updating-consensus-parameters)
+                - [`InitChain`](#initchain)
+                - [`FinalizeBlock`, `PrepareProposal`/`ProcessProposal`](#finalizeblock-prepareproposalprocessproposal)
+        - [`Query`](#query)
+            - [Query Proofs](#query-proofs)
+            - [Peer Filtering](#peer-filtering)
+            - [Paths](#paths)
+        - [Crash Recovery](#crash-recovery)
+        - [State Sync](#state-sync)
+            - [Taking Snapshots](#taking-snapshots)
+            - [Bootstrapping a Node](#bootstrapping-a-node)
+                - [Snapshot Discovery](#snapshot-discovery)
+                - [Snapshot Restoration](#snapshot-restoration)
+                - [Snapshot Verification](#snapshot-verification)
+                - [Transition to Consensus](#transition-to-consensus)
+    - [Application configuration required to switch to ABCI 2.0](#application-configuration-required-to-switch-to-abci-20)
 
 ## Formal Requirements
 
@@ -548,11 +545,10 @@ a given public key can only appear once within a given update. If an update incl
 duplicates, the block execution will fail irrecoverably.
 
 Structure `ValidatorUpdate` contains a public key, which is used to identify the validator:
-The public key currently supports four types:
+The public key currently supports three types:
 
 - `ed25519`
 - `secp256k1`
-- `secp256k1eth`
 - `bls12381`
 
 Structure `ValidatorUpdate` also contains an `ìnt64` field denoting the validator's new power.
@@ -1053,7 +1049,7 @@ can be spoofed by adversaries.
 Apps may also want to consider state sync denial-of-service vectors, where adversaries provide
 invalid or harmful snapshots to prevent nodes from joining the network. The application can
 counteract this by asking CometBFT to ban peers. As a last resort, node operators can use
-P2P configuration options to list an exclusive set of trusted peers that can provide valid snapshots.
+P2P configuration options to whitelist a set of trusted peers that can provide valid snapshots.
 
 ##### Transition to Consensus
 

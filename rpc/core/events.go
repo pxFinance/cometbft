@@ -19,24 +19,15 @@ const (
 )
 
 // Subscribe for events via WebSocket.
-// More: https://docs.cometbft.com/v0.38.x/rpc/#/Websocket/subscribe
+// More: https://docs.cometbft.com/main/rpc/#/Websocket/subscribe
 func (env *Environment) Subscribe(ctx *rpctypes.Context, query string) (*ctypes.ResultSubscribe, error) {
 	addr := ctx.RemoteAddr()
 
-	numClients := env.EventBus.NumClients()
-	numSubs := env.EventBus.NumClientSubscriptions(addr)
-
 	switch {
-	case numClients >= env.Config.MaxSubscriptionClients:
-		return nil, fmt.Errorf(
-			"max_subscription_clients %d reached",
-			env.Config.MaxSubscriptionClients,
-		)
-	case numSubs >= env.Config.MaxSubscriptionsPerClient:
-		return nil, fmt.Errorf(
-			"max_subscriptions_per_client %d reached",
-			env.Config.MaxSubscriptionsPerClient,
-		)
+	case env.EventBus.NumClients() >= env.Config.MaxSubscriptionClients:
+		return nil, fmt.Errorf("max_subscription_clients %d reached", env.Config.MaxSubscriptionClients)
+	case env.EventBus.NumClientSubscriptions(addr) >= env.Config.MaxSubscriptionsPerClient:
+		return nil, fmt.Errorf("max_subscriptions_per_client %d reached", env.Config.MaxSubscriptionsPerClient)
 	case len(query) > maxQueryLength:
 		return nil, errors.New("maximum query length exceeded")
 	}
@@ -112,7 +103,7 @@ func (env *Environment) Subscribe(ctx *rpctypes.Context, query string) (*ctypes.
 }
 
 // Unsubscribe from events via WebSocket.
-// More: https://docs.cometbft.com/v0.38.x/rpc/#/Websocket/unsubscribe
+// More: https://docs.cometbft.com/main/rpc/#/Websocket/unsubscribe
 func (env *Environment) Unsubscribe(ctx *rpctypes.Context, query string) (*ctypes.ResultUnsubscribe, error) {
 	addr := ctx.RemoteAddr()
 	env.Logger.Info("Unsubscribe from query", "remote", addr, "query", query)
@@ -128,7 +119,7 @@ func (env *Environment) Unsubscribe(ctx *rpctypes.Context, query string) (*ctype
 }
 
 // UnsubscribeAll from all events via WebSocket.
-// More: https://docs.cometbft.com/v0.38.x/rpc/#/Websocket/unsubscribe_all
+// More: https://docs.cometbft.com/main/rpc/#/Websocket/unsubscribe_all
 func (env *Environment) UnsubscribeAll(ctx *rpctypes.Context) (*ctypes.ResultUnsubscribe, error) {
 	addr := ctx.RemoteAddr()
 	env.Logger.Info("Unsubscribe from all", "remote", addr)

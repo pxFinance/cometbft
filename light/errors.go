@@ -8,6 +8,8 @@ import (
 	"github.com/cometbft/cometbft/types"
 )
 
+var ErrEmptyTrustedStore = errors.New("trusted store is empty")
+
 // ErrOldHeaderExpired means the old (trusted) header has expired according to
 // the given trustingPeriod and current time. If so, the light client must be
 // reset subjectively.
@@ -27,7 +29,7 @@ type ErrNewValSetCantBeTrusted struct {
 }
 
 func (e ErrNewValSetCantBeTrusted) Error() string {
-	return fmt.Sprintf("cant trust new val set: %v", e.Reason)
+	return fmt.Sprintf("can't trust new val set: %v", e.Reason)
 }
 
 // ErrInvalidHeader means the header either failed the basic validation or

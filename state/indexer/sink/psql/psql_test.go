@@ -3,11 +3,13 @@ package psql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,13 +20,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	_ "github.com/lib/pq"
+
 	abci "github.com/cometbft/cometbft/abci/types"
 	tmlog "github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/state/txindex"
 	"github.com/cometbft/cometbft/types"
-
-	// Register the Postgres database driver.
-	_ "github.com/lib/pq"
 )
 
 var (
@@ -37,15 +38,20 @@ var (
 )
 
 const (
-	user     = "postgres"
-	password = "secret"
-	port     = "5432"
-	dsn      = "postgres://%s:%s@localhost:%s/%s?sslmode=disable"
-	dbName   = "postgres"
-	chainID  = "test-chainID"
+	user            = "postgres"
+	password        = "secret"
+	port            = "5432"
+	portID          = port + "/tcp"
+	hostIP          = "127.0.0.1"
+	dsn             = "postgres://%s:%s@%s/%s?sslmode=disable"
+	dbName          = "postgres"
+	chainID         = "test-chainID"
+	startMaxRetries = 5
 
 	viewBlockEvents = "block_events"
 	viewTxEvents    = "tx_events"
+
+	eventTypeFinalizeBlock = "finalize_block"
 )
 
 func TestMain(m *testing.M) {
@@ -54,26 +60,19 @@ func TestMain(m *testing.M) {
 	// Set up docker and start a container running PostgreSQL.
 	pool, err := dockertest.NewPool(os.Getenv("DOCKER_URL"))
 	if err != nil {
+		if dockerUnavailable(err) {
+			log.Printf("Skipping PostgreSQL integration tests: %v", err)
+			os.Exit(0)
+		}
 		log.Fatalf("Creating docker pool: %v", err)
 	}
 
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "postgres",
-		Tag:        "13",
-		Env: []string{
-			"POSTGRES_USER=" + user,
-			"POSTGRES_PASSWORD=" + password,
-			"POSTGRES_DB=" + dbName,
-			"listen_addresses = '*'",
-		},
-	}, func(config *docker.HostConfig) {
-		// set AutoRemove to true so that stopped container goes away by itself
-		config.AutoRemove = true
-		config.RestartPolicy = docker.RestartPolicy{
-			Name: "no",
-		}
-	})
+	resource, err := startPostgresContainer(pool)
 	if err != nil {
+		if dockerUnavailable(err) {
+			log.Printf("Skipping PostgreSQL integration tests: %v", err)
+			os.Exit(0)
+		}
 		log.Fatalf("Starting docker pool: %v", err)
 	}
 
@@ -87,7 +86,7 @@ func TestMain(m *testing.M) {
 
 	// Connect to the database, clear any leftover data, and install the
 	// indexing schema.
-	conn := fmt.Sprintf(dsn, user, password, resource.GetPort(port+"/tcp"), dbName)
+	conn := fmt.Sprintf(dsn, user, password, resource.GetHostPort(portID), dbName)
 	var db *sql.DB
 
 	if err := pool.Retry(func() error {
@@ -137,13 +136,99 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func dockerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	return strings.Contains(msg, "docker.sock") ||
+		strings.Contains(msg, "Cannot connect to the Docker daemon") ||
+		strings.Contains(msg, "connection refused")
+}
+
+func startPostgresContainer(pool *dockertest.Pool) (*dockertest.Resource, error) {
+	var err error
+
+	for attempt := 1; attempt <= startMaxRetries; attempt++ {
+		name := fmt.Sprintf("cometbft-psql-test-%d-%d", os.Getpid(), time.Now().UnixNano())
+
+		resource, runErr := pool.RunWithOptions(&dockertest.RunOptions{
+			Name:       name,
+			Repository: "postgres",
+			Tag:        "13",
+			Env: []string{
+				"POSTGRES_USER=" + user,
+				"POSTGRES_PASSWORD=" + password,
+				"POSTGRES_DB=" + dbName,
+				"listen_addresses = '*'",
+			},
+			ExposedPorts: []string{port},
+			PortBindings: map[docker.Port][]docker.PortBinding{
+				docker.Port(portID): {{
+					HostIP:   hostIP,
+					HostPort: "",
+				}},
+			},
+		}, func(config *docker.HostConfig) {
+			config.PublishAllPorts = false
+			// set AutoRemove to true so that stopped container goes away by itself
+			config.AutoRemove = true
+			config.RestartPolicy = docker.RestartPolicy{
+				Name: "no",
+			}
+		})
+		if runErr == nil {
+			return resource, nil
+		}
+
+		err = runErr
+		if dockerUnavailable(err) {
+			return nil, err
+		}
+
+		if !dockerStartupRetryable(err) || attempt == startMaxRetries {
+			return nil, err
+		}
+
+		cleanupFailedContainer(pool, name)
+		log.Printf("Retrying PostgreSQL container startup after transient Docker error (%d/%d): %v", attempt, startMaxRetries, err)
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+
+	return nil, err
+}
+
+func dockerStartupRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "port is already allocated")
+}
+
+func cleanupFailedContainer(pool *dockertest.Pool, name string) {
+	var noSuchContainer *docker.NoSuchContainer
+
+	if err := pool.Client.RemoveContainer(docker.RemoveContainerOptions{
+		ID:            name,
+		Force:         true,
+		RemoveVolumes: true,
+	}); err != nil && !dockerUnavailable(err) && !errors.As(err, &noSuchContainer) {
+		log.Printf("WARNING: failed to remove transient PostgreSQL test container %q: %v", name, err)
+	}
+}
+
 func TestIndexing(t *testing.T) {
 	t.Run("IndexBlockEvents", func(t *testing.T) {
-		indexer := &EventSink{store: testDB(), chainID: chainID}
+		indexer, err := NewEventSink("", chainID, WithStore(testDB()))
+		require.Nil(t, err, "event sink creation")
 		require.NoError(t, indexer.IndexBlockEvents(newTestBlockEvents()))
 
-		verifyBlock(t, 1)
-		verifyBlock(t, 2)
+		verifyBlock(t, indexer, 1)
+		verifyBlock(t, indexer, 2)
 
 		verifyNotImplemented(t, "hasBlock", func() (bool, error) { return indexer.HasBlock(1) })
 		verifyNotImplemented(t, "hasBlock", func() (bool, error) { return indexer.HasBlock(2) })
@@ -153,14 +238,15 @@ func TestIndexing(t *testing.T) {
 			return v != nil, err
 		})
 
-		require.NoError(t, verifyTimeStamp(tableBlocks))
+		require.NoError(t, verifyTimeStamp(indexer.tableBlocks))
 
 		// Attempting to reindex the same events should gracefully succeed.
 		require.NoError(t, indexer.IndexBlockEvents(newTestBlockEvents()))
 	})
 
 	t.Run("IndexTxEvents", func(t *testing.T) {
-		indexer := &EventSink{store: testDB(), chainID: chainID}
+		indexer, err := NewEventSink("", chainID, WithStore(testDB()))
+		require.Nil(t, err, "event sink creation")
 
 		txResult := txResultWithEvents([]abci.Event{
 			makeIndexedEvent("account.number", "1"),
@@ -177,11 +263,11 @@ func TestIndexing(t *testing.T) {
 		})
 		require.NoError(t, indexer.IndexTxEvents([]*abci.TxResult{txResult}))
 
-		txr, err := loadTxResult(types.Tx(txResult.Tx).Hash())
+		txr, err := loadTxResult(indexer, types.Tx(txResult.Tx).Hash())
 		require.NoError(t, err)
 		assert.Equal(t, txResult, txr)
 
-		require.NoError(t, verifyTimeStamp(tableTxResults))
+		require.NoError(t, verifyTimeStamp(indexer.tableTxResults))
 		require.NoError(t, verifyTimeStamp(viewTxEvents))
 
 		verifyNotImplemented(t, "getTxByHash", func() (bool, error) {
@@ -199,11 +285,12 @@ func TestIndexing(t *testing.T) {
 	})
 
 	t.Run("IndexerService", func(t *testing.T) {
-		indexer := &EventSink{store: testDB(), chainID: chainID}
+		indexer, err := NewEventSink("", chainID, WithStore(testDB()))
+		require.Nil(t, err, "event sink creation")
 
 		// event bus
 		eventBus := types.NewEventBus()
-		err := eventBus.Start()
+		err = eventBus.Start()
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			if err := eventBus.Stop(); err != nil {
@@ -268,7 +355,7 @@ func newTestBlockEvents() types.EventDataNewBlockEvents {
 	}
 }
 
-// readSchema loads the indexing database schema file
+// readSchema loads the indexing database schema file.
 func readSchema() ([]*schema.Migration, error) {
 	const filename = "schema.sql"
 	contents, err := os.ReadFile(filename)
@@ -311,11 +398,11 @@ func txResultWithEvents(events []abci.Event) *abci.TxResult {
 	}
 }
 
-func loadTxResult(hash []byte) (*abci.TxResult, error) {
+func loadTxResult(indexer *EventSink, hash []byte) (*abci.TxResult, error) {
 	hashString := fmt.Sprintf("%X", hash)
 	var resultData []byte
-	if err := testDB().QueryRow(`
-SELECT tx_result FROM `+tableTxResults+` WHERE tx_hash = $1;
+	if err := indexer.store.QueryRow(`
+SELECT tx_result FROM `+indexer.tableTxResults+` WHERE tx_hash = $1;
 `, hashString).Scan(&resultData); err != nil {
 		return nil, fmt.Errorf("lookup transaction for hash %q failed: %v", hashString, err)
 	}
@@ -336,21 +423,22 @@ SELECT DISTINCT %[1]s.created_at
 `, tableName), time.Now().Add(-2*time.Second)).Err()
 }
 
-func verifyBlock(t *testing.T, height int64) {
+func verifyBlock(t *testing.T, indexer *EventSink, height int64) {
+	t.Helper()
 	// Check that the blocks table contains an entry for this height.
-	if err := testDB().QueryRow(`
-SELECT height FROM `+tableBlocks+` WHERE height = $1;
-`, height).Err(); err == sql.ErrNoRows {
+	if err := indexer.store.QueryRow(`
+SELECT height FROM `+indexer.tableBlocks+` WHERE height = $1;
+`, height).Err(); errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("No block found for height=%d", height)
 	} else if err != nil {
 		t.Fatalf("Database query failed: %v", err)
 	}
 
 	// Verify the presence of begin_block and end_block events.
-	if err := testDB().QueryRow(`
+	if err := indexer.store.QueryRow(`
 SELECT type, height, chain_id FROM `+viewBlockEvents+`
   WHERE height = $1 AND type = $2 AND chain_id = $3;
-`, height, eventTypeFinalizeBlock, chainID).Err(); err == sql.ErrNoRows {
+`, height, eventTypeFinalizeBlock, chainID).Err(); errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("No %q event found for height=%d", eventTypeFinalizeBlock, height)
 	} else if err != nil {
 		t.Fatalf("Database query failed: %v", err)
@@ -367,7 +455,7 @@ func verifyNotImplemented(t *testing.T, label string, f func() (bool, error)) {
 	want := label + " is not supported via the postgres event sink"
 	ok, err := f()
 	assert.False(t, ok)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	assert.Equal(t, want, err.Error())
 }
 

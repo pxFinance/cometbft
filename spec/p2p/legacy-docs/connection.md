@@ -85,7 +85,7 @@ incoming messages are received on the reactor.
 // Declare a MyReactor reactor that handles messages on MyChannelID.
 type MyReactor struct{}
 
-func (reactor MyReactor) StreamDescriptors() []*ChannelDescriptor {
+func (reactor MyReactor) GetChannels() []*ChannelDescriptor {
     return []*ChannelDescriptor{ChannelDescriptor{ID:MyChannelID, Priority: 1}}
 }
 

@@ -91,7 +91,7 @@ returned channel, which is closed when all operations are completed.
 >   part of the `Peer.Send(Envelope)` helper method, that is, once per
 >   connected peer.
 > - The return value of the broadcast method is not considered by any of the
->   standard reactors that employ the method. One of the reasons is that is
+>   standard reactors that employ the method. One of the reasons is that is is
 >   not possible to associate each of the boolean outputs added to the
 >   returned channel to a peer.
 
@@ -182,16 +182,15 @@ From this point, reactors can use the methods of the new `Peer` instance.
 The table below summarizes the interaction of the standard reactors with
 connected peers, with the `Peer` methods used by them:
 
-| `Peer` API method          | consensus | block sync | state sync | mempool | evidence | PEX |
-|----------------------------|-----------|------------|------------|---------|----------|-----|
-| `ID() ID`                  | x         | x          | x          | x       | x        | x   |
-| `IsRunning() bool`         | x         |            |            | x       | x        |     |
-| `Quit() <-chan struct{}`   |           |            |            | x       | x        |     |
-| `Get(string) interface{}`  | x         |            |            | x       | x        |     |
-| `Set(string, interface{})` | x         |            |            |         |          |     |
-| `HasChannel(byte) bool`    | x         |            |            | x       | x        |     |
-| `Send(Envelope) bool`      | x         | x          | x          | x       | x        | x   |
-| `TrySend(Envelope) bool`   | x         | x          |            |         |          |     |
+| `Peer` API method                                     | consensus | block sync | state sync | mempool | evidence  | PEX   |
+|--------------------------------------------|-----------|------------|------------|---------|-----------|-------|
+| `ID() ID`                                  | x         | x          | x          | x       | x         | x     |
+| `IsRunning() bool`                         | x         |            |            | x       | x         |       |
+| `Quit() <-chan struct{}`                   |           |            |            | x       | x         |       |
+| `Get(string) interface{}`                  | x         |            |            | x       | x         |       |
+| `Set(string, interface{})`                 | x         |            |            |         |           |       |
+| `Send(Envelope) bool`                      | x         | x          | x          | x       | x         | x     |
+| `TrySend(Envelope) bool`                   | x         | x          |            |         |           |       |
 
 The above list is not exhaustive as it does not include all the `Peer` methods
 invoked by the PEX reactor, a special component that should be considered part
@@ -267,10 +266,8 @@ Finally, a `Peer` instance allows a reactor to send messages to companion
 reactors running at that peer.
 This is ultimately the goal of the switch when it provides `Peer` instances to
 the registered reactors.
-There are two methods for sending messages, and one auxiliary method to check
-whether the peer supports a given channel:
+There are two methods for sending messages:
 
-    func (p Peer) HasChannel(chID byte) bool
     func (p Peer) Send(e Envelope) bool
     func (p Peer) TrySend(e Envelope) bool
 
@@ -279,9 +276,6 @@ set as follows:
 
 - `ChannelID`: the channel the message should be sent through, which defines
   the reactor that will process the message;
-  - The auxiliary `HasChannel()` method allows testing whether the remote peer
-    implements a channel; if it does not, both message-sending methods will
-    immediately return `false`, as sending always fails.
 - `Src`: this field represents the source of an incoming message, which is
   irrelevant for outgoing messages;
 - `Message`: the actual message's payload, which is marshalled using protocol buffers.

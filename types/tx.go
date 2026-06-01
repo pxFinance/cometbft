@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 
+	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/cometbft/cometbft/crypto/tmhash"
 	cmtbytes "github.com/cometbft/cometbft/libs/bytes"
-	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 )
 
-// TxKeySize is the size of the transaction key index
+// TxKeySize is the size of the transaction key index.
 const TxKeySize = sha256.Size
 
 type (
@@ -39,6 +39,10 @@ func (tx Tx) String() string {
 	return fmt.Sprintf("Tx{%X}", []byte(tx))
 }
 
+func (txKey TxKey) Hash() []byte {
+	return txKey[:]
+}
+
 // Txs is a slice of Tx.
 type Txs []Tx
 
@@ -49,7 +53,7 @@ func (txs Txs) Hash() []byte {
 	return merkle.HashFromByteSlices(hl)
 }
 
-// Index returns the index of this transaction in the list, or -1 if not found
+// Index returns the index of this transaction in the list, or -1 if not found.
 func (txs Txs) Index(tx Tx) int {
 	for i := range txs {
 		if bytes.Equal(txs[i], tx) {
@@ -59,7 +63,7 @@ func (txs Txs) Index(tx Tx) int {
 	return -1
 }
 
-// IndexByHash returns the index of this transaction hash in the list, or -1 if not found
+// IndexByHash returns the index of this transaction hash in the list, or -1 if not found.
 func (txs Txs) IndexByHash(hash []byte) int {
 	for i := range txs {
 		if bytes.Equal(txs[i].Hash(), hash) {
@@ -91,8 +95,13 @@ func (txs Txs) hashList() [][]byte {
 // Txs is a slice of transactions. Sorting a Txs value orders the transactions
 // lexicographically.
 
-func (txs Txs) Len() int      { return len(txs) }
+// Deprecated: Do not use.
+func (txs Txs) Len() int { return len(txs) }
+
+// Deprecated: Do not use.
 func (txs Txs) Swap(i, j int) { txs[i], txs[j] = txs[j], txs[i] }
+
+// Deprecated: Do not use.
 func (txs Txs) Less(i, j int) bool {
 	return bytes.Compare(txs[i], txs[j]) == -1
 }

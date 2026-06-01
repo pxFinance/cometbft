@@ -22,7 +22,7 @@ func WriteConfigVals(dir string, vals map[string]string) error {
 }
 
 // RunWithArgs executes the given command with the specified command line args
-// and environmental variables set. It returns any error returned from cmd.Execute()
+// and environmental variables set. It returns any error returned from cmd.Execute().
 func RunWithArgs(cmd Executable, args []string, env map[string]string) error {
 	oargs := os.Args
 	oenv := map[string]string{}
@@ -52,7 +52,7 @@ func RunWithArgs(cmd Executable, args []string, env map[string]string) error {
 // RunCaptureWithArgs executes the given command with the specified command
 // line args and environmental variables set. It returns string fields
 // representing output written to stdout and stderr, additionally any error
-// from cmd.Execute() is also returned
+// from cmd.Execute() is also returned.
 func RunCaptureWithArgs(cmd Executable, args []string, env map[string]string) (stdout, stderr string, err error) {
 	oldout, olderr := os.Stdout, os.Stderr // keep backup of the real stdout
 	rOut, wOut, _ := os.Pipe()
@@ -68,7 +68,7 @@ func RunCaptureWithArgs(cmd Executable, args []string, env map[string]string) (s
 		go func() {
 			var buf bytes.Buffer
 			// io.Copy will end when we call reader.Close() below
-			_, _ = io.Copy(&buf, reader)
+			io.Copy(&buf, reader) //nolint:errcheck //ignore error
 			stdC <- buf.String()
 		}()
 		return &stdC

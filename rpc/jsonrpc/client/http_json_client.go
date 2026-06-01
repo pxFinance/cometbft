@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	cmtsync "github.com/cometbft/cometbft/libs/sync"
-	types "github.com/cometbft/cometbft/rpc/jsonrpc/types"
+	"github.com/cometbft/cometbft/rpc/jsonrpc/types"
 )
 
 const (
@@ -27,16 +27,16 @@ const (
 
 var endsWithPortPattern = regexp.MustCompile(`:[0-9]+$`)
 
-//-------------------------------------------------------------
+// -------------------------------------------------------------
 
-// Parsed URL structure
+// Parsed URL structure.
 type parsedURL struct {
 	url.URL
 
 	isUnixSocket bool
 }
 
-// Parse URL and set defaults
+// Parse URL and set defaults.
 func newParsedURL(remoteAddr string) (*parsedURL, error) {
 	u, err := url.Parse(remoteAddr)
 	if err != nil {
@@ -60,7 +60,7 @@ func newParsedURL(remoteAddr string) (*parsedURL, error) {
 	return pu, nil
 }
 
-// Change protocol to HTTP for unknown protocols and TCP protocol - useful for RPC connections
+// Change protocol to HTTP for unknown protocols and TCP protocol - useful for RPC connections.
 func (u *parsedURL) SetDefaultSchemeHTTP() {
 	// protocol to use for http operations, to support both http and https
 	switch u.Scheme {
@@ -72,13 +72,13 @@ func (u *parsedURL) SetDefaultSchemeHTTP() {
 	}
 }
 
-// Get full address without the protocol - useful for Dialer connections
+// Get full address without the protocol - useful for Dialer connections.
 func (u parsedURL) GetHostWithPath() string {
 	// Remove protocol, userinfo and # fragment, assume opaque is empty
 	return u.Host + u.EscapedPath()
 }
 
-// Get a trimmed address - useful for WS connections
+// Get a trimmed address - useful for WS connections.
 func (u parsedURL) GetTrimmedHostWithPath() string {
 	// if it's not an unix socket we return the normal URL
 	if !u.isUnixSocket {
@@ -90,7 +90,7 @@ func (u parsedURL) GetTrimmedHostWithPath() string {
 	return strings.ReplaceAll(u.GetHostWithPath(), "/", ".")
 }
 
-// GetDialAddress returns the endpoint to dial for the parsed URL
+// GetDialAddress returns the endpoint to dial for the parsed URL.
 func (u parsedURL) GetDialAddress() string {
 	// if it's not a unix socket we return the host with port, example: localhost:443
 	if !u.isUnixSocket {
@@ -99,10 +99,9 @@ func (u parsedURL) GetDialAddress() string {
 			// http and ws default to port 80, https and wss default to port 443
 			// https://www.rfc-editor.org/rfc/rfc9110#section-4.2
 			// https://www.rfc-editor.org/rfc/rfc6455.html#section-3
-			switch u.Scheme {
-			case protoHTTP, protoWS:
+			if u.Scheme == protoHTTP || u.Scheme == protoWS {
 				return u.Host + `:80`
-			case protoHTTPS, protoWSS:
+			} else if u.Scheme == protoHTTPS || u.Scheme == protoWSS {
 				return u.Host + `:443`
 			}
 		}
@@ -112,12 +111,12 @@ func (u parsedURL) GetDialAddress() string {
 	return u.GetHostWithPath()
 }
 
-// Get a trimmed address with protocol - useful as address in RPC connections
+// Get a trimmed address with protocol - useful as address in RPC connections.
 func (u parsedURL) GetTrimmedURL() string {
 	return u.Scheme + "://" + u.GetTrimmedHostWithPath()
 }
 
-//-------------------------------------------------------------
+// -------------------------------------------------------------
 
 // HTTPClient is a common interface for JSON-RPC HTTP clients.
 type HTTPClient interface {
@@ -130,7 +129,7 @@ type Caller interface {
 	Call(ctx context.Context, method string, params map[string]any, result any) (any, error)
 }
 
-//-------------------------------------------------------------
+// -------------------------------------------------------------
 
 // Client is a JSON-RPC client, which sends POST HTTP requests to the
 // remote server.
@@ -317,7 +316,7 @@ func (c *Client) nextRequestID() types.JSONRPCIntID {
 	return types.JSONRPCIntID(id)
 }
 
-//------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------
 
 // jsonRPCBufferedRequest encapsulates a single buffered request, as well as its
 // anticipated response structure.
@@ -391,9 +390,10 @@ func (b *RequestBatch) Call(
 	return result, nil
 }
 
-//-------------------------------------------------------------
+// -------------------------------------------------------------
 
-func makeHTTPDialer(remoteAddr string) (func(string, string) (net.Conn, error), error) {
+// MakeHTTPDialer creates an HTTP client dialer based on the given URL.
+func MakeHTTPDialer(remoteAddr string) (func(string, string) (net.Conn, error), error) {
 	u, err := newParsedURL(remoteAddr)
 	if err != nil {
 		return nil, err
@@ -407,7 +407,7 @@ func makeHTTPDialer(remoteAddr string) (func(string, string) (net.Conn, error), 
 		protocol = protoTCP
 	}
 
-	dialFn := func(proto, addr string) (net.Conn, error) {
+	dialFn := func(_, _ string) (net.Conn, error) {
 		return net.Dial(protocol, u.GetDialAddress())
 	}
 
@@ -419,7 +419,7 @@ func makeHTTPDialer(remoteAddr string) (func(string, string) (net.Conn, error), 
 // remoteAddr should be fully featured (eg. with tcp:// or unix://).
 // An error will be returned in case of invalid remoteAddr.
 func DefaultHTTPClient(remoteAddr string) (*http.Client, error) {
-	dialFn, err := makeHTTPDialer(remoteAddr)
+	dialFn, err := MakeHTTPDialer(remoteAddr)
 	if err != nil {
 		return nil, err
 	}

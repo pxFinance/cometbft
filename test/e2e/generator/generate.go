@@ -13,53 +13,46 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/cometbft/cometbft/crypto/bls12381"
-	"github.com/cometbft/cometbft/crypto/ed25519"
-	"github.com/cometbft/cometbft/crypto/mldsa65"
-	"github.com/cometbft/cometbft/crypto/secp256k1"
 	e2e "github.com/cometbft/cometbft/test/e2e/pkg"
 	"github.com/cometbft/cometbft/version"
 )
-
-// optLarge is the shared "large" choice token used by both the topology and
-// ABCI-delay dimensions.
-const optLarge = "large"
 
 var (
 	// testnetCombinations defines global testnet options, where we generate a
 	// separate testnet for each combination (Cartesian product) of options.
 	testnetCombinations = map[string][]any{
-		"topology":      {"single", "quad", optLarge},
+		"topology":      {"single", "quad", "large"},
 		"initialHeight": {0, 1000},
 		"initialState": {
 			map[string]string{},
 			map[string]string{"initial01": "a", "initial02": "b", "initial03": "c"},
 		},
 		"validators": {"genesis", "initchain"},
+		"no_lanes":   {true, false},
 	}
 	nodeVersions = weightedChoice{
 		"": 2,
 	}
 
 	// The following specify randomly chosen values for testnet nodes.
-	nodeDatabases = uniformChoice{"goleveldb", "cleveldb", "rocksdb", "badgerdb"}
+	nodeDatabases = uniformChoice{"goleveldb", "rocksdb", "badgerdb", "pebbledb"}
 	ipv6          = uniformChoice{false, true}
 	// FIXME: grpc disabled due to https://github.com/tendermint/tendermint/issues/5439
-	nodeABCIProtocols         = uniformChoice{"unix", "tcp", "builtin", "builtin_connsync"} // "grpc"
-	nodePrivvalProtocols      = uniformChoice{"file", "unix", "tcp"}
-	nodeBlockSyncs            = uniformChoice{"v0"} // "v2"
-	nodeBlockSyncAdaptiveSync = uniformChoice{false, true}
-	nodeStateSyncs            = uniformChoice{false, true}
-	nodePersistIntervals      = uniformChoice{0, 1, 5}
-	nodeSnapshotIntervals     = uniformChoice{0, 3}
-	nodeRetainBlocks          = uniformChoice{
+	nodeABCIProtocols     = uniformChoice{"unix", "tcp", "builtin", "builtin_connsync"} // "grpc"
+	nodePrivvalProtocols  = uniformChoice{"file", "unix", "tcp"}
+	nodeBlockSyncs        = uniformChoice{"v0"} // "v2"
+	nodeStateSyncs        = uniformChoice{false, true}
+	nodePersistIntervals  = uniformChoice{0, 1, 5}
+	nodeSnapshotIntervals = uniformChoice{0, 3}
+	nodeRetainBlocks      = uniformChoice{
 		0,
 		2 * int(e2e.EvidenceAgeHeight),
 		4 * int(e2e.EvidenceAgeHeight),
 	}
-	evidence          = uniformChoice{0, 1, 10, 20, 200}
-	abciDelays        = uniformChoice{"none", "small", optLarge}
-	nodePerturbations = probSetChoice{
+	nodeEnableCompanionPruning = uniformChoice{true, false}
+	evidence                   = uniformChoice{0, 1, 10, 20, 200}
+	abciDelays                 = uniformChoice{"none", "small", "large"}
+	nodePerturbations          = probSetChoice{
 		"disconnect": 0.1,
 		"pause":      0.1,
 		"kill":       0.1,
@@ -69,11 +62,13 @@ var (
 	lightNodePerturbations = probSetChoice{
 		"upgrade": 0.3,
 	}
-	voteExtensionUpdateHeight = uniformChoice{int64(-1), int64(0), int64(1)} // -1: genesis, 0: InitChain, 1: (use offset)
-	voteExtensionEnabled      = weightedChoice{true: 3, false: 1}
-	voteExtensionHeightOffset = uniformChoice{int64(0), int64(10), int64(100)}
-	voteExtensionSize         = uniformChoice{uint(128), uint(512), uint(2048), uint(8192)} //TODO: define the right values depending on experiment results.
-	keyType                   = uniformChoice{ed25519.KeyType, secp256k1.KeyType, bls12381.KeyType, mldsa65.KeyType}
+	voteExtensionsUpdateHeight = uniformChoice{int64(-1), int64(0), int64(1)} // -1: genesis, 0: InitChain, 1: (use offset)
+	voteExtensionEnabled       = weightedChoice{true: 3, false: 1}
+	voteExtensionsHeightOffset = uniformChoice{int64(0), int64(10), int64(100)}
+	voteExtensionSize          = uniformChoice{uint(128), uint(512), uint(2048), uint(8192)} // TODO: define the right values depending on experiment results.
+	pbtsUpdateHeight           = uniformChoice{int64(-1), int64(0), int64(1)}                // -1: genesis, 0: InitChain, 1: (use offset)
+	pbtsEnabled                = weightedChoice{true: 3, false: 1}
+	pbtsHeightOffset           = uniformChoice{int64(0), int64(10), int64(100)}
 )
 
 type generateConfig struct {
@@ -81,6 +76,7 @@ type generateConfig struct {
 	outputDir    string
 	multiVersion string
 	prometheus   bool
+	logLevel     string
 }
 
 // Generate generates random testnets using the given RNG.
@@ -120,10 +116,9 @@ func Generate(cfg *generateConfig) ([]e2e.Manifest, error) {
 			fmt.Printf("- %s: %d\n", ver, wt)
 		}
 	}
-
-	manifests := make([]e2e.Manifest, 0, len(testnetCombinations))
+	manifests := []e2e.Manifest{}
 	for _, opt := range combinations(testnetCombinations) {
-		manifest, err := generateTestnet(cfg.randSource, opt, upgradeVersion, cfg.prometheus)
+		manifest, err := generateTestnet(cfg.randSource, opt, upgradeVersion, cfg.prometheus, cfg.logLevel)
 		if err != nil {
 			return nil, err
 		}
@@ -133,19 +128,19 @@ func Generate(cfg *generateConfig) ([]e2e.Manifest, error) {
 }
 
 // generateTestnet generates a single testnet with the given options.
-func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, prometheus bool) (e2e.Manifest, error) {
+func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, prometheus bool, logLevel string) (e2e.Manifest, error) {
 	manifest := e2e.Manifest{
-		IPv6:             ipv6.Choose(r).(bool),
-		ABCIProtocol:     nodeABCIProtocols.Choose(r).(string),
-		InitialHeight:    int64(opt["initialHeight"].(int)),
-		InitialState:     opt["initialState"].(map[string]string),
-		Validators:       &map[string]int64{},
-		ValidatorUpdates: map[string]map[string]int64{},
-		KeyType:          keyType.Choose(r).(string),
-		Evidence:         evidence.Choose(r).(int),
-		Nodes:            map[string]*e2e.ManifestNode{},
-		UpgradeVersion:   upgradeVersion,
-		Prometheus:       prometheus,
+		IPv6:                ipv6.Choose(r).(bool),
+		ABCIProtocol:        nodeABCIProtocols.Choose(r).(string),
+		InitialHeight:       int64(opt["initialHeight"].(int)),
+		InitialState:        opt["initialState"].(map[string]string),
+		ValidatorsMap:       &map[string]int64{},
+		ValidatorUpdatesMap: map[string]map[string]int64{},
+		Evidence:            evidence.Choose(r).(int),
+		NodesMap:            map[string]*e2e.ManifestNode{},
+		UpgradeVersion:      upgradeVersion,
+		Prometheus:          prometheus,
+		LogLevel:            logLevel,
 	}
 
 	switch abciDelays.Choose(r).(string) {
@@ -155,31 +150,41 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 		manifest.ProcessProposalDelay = 100 * time.Millisecond
 		manifest.VoteExtensionDelay = 20 * time.Millisecond
 		manifest.FinalizeBlockDelay = 200 * time.Millisecond
-	case optLarge:
+	case "large":
 		manifest.PrepareProposalDelay = 200 * time.Millisecond
 		manifest.ProcessProposalDelay = 200 * time.Millisecond
 		manifest.CheckTxDelay = 20 * time.Millisecond
 		manifest.VoteExtensionDelay = 100 * time.Millisecond
 		manifest.FinalizeBlockDelay = 500 * time.Millisecond
 	}
-	manifest.VoteExtensionsUpdateHeight = voteExtensionUpdateHeight.Choose(r).(int64)
+	manifest.VoteExtensionsUpdateHeight = voteExtensionsUpdateHeight.Choose(r).(int64)
 	if manifest.VoteExtensionsUpdateHeight == 1 {
-		manifest.VoteExtensionsUpdateHeight = manifest.InitialHeight + voteExtensionHeightOffset.Choose(r).(int64)
+		manifest.VoteExtensionsUpdateHeight = manifest.InitialHeight + voteExtensionsHeightOffset.Choose(r).(int64)
 	}
 	if voteExtensionEnabled.Choose(r).(bool) {
 		baseHeight := max(manifest.VoteExtensionsUpdateHeight+1, manifest.InitialHeight)
-		manifest.VoteExtensionsEnableHeight = baseHeight + voteExtensionHeightOffset.Choose(r).(int64)
+		manifest.VoteExtensionsEnableHeight = baseHeight + voteExtensionsHeightOffset.Choose(r).(int64)
 	}
 
 	manifest.VoteExtensionSize = voteExtensionSize.Choose(r).(uint)
 
+	manifest.PbtsUpdateHeight = pbtsUpdateHeight.Choose(r).(int64)
+	if manifest.PbtsUpdateHeight == 1 {
+		manifest.PbtsUpdateHeight = manifest.InitialHeight + pbtsHeightOffset.Choose(r).(int64)
+	}
+	if pbtsEnabled.Choose(r).(bool) {
+		baseHeight := max(manifest.PbtsUpdateHeight+1, manifest.InitialHeight)
+		manifest.PbtsEnableHeight = baseHeight + pbtsHeightOffset.Choose(r).(int64)
+	}
+
+	// TODO: Add skew config
 	var numSeeds, numValidators, numFulls, numLightClients int
 	switch opt["topology"].(string) {
 	case "single":
 		numValidators = 1
 	case "quad":
 		numValidators = 4
-	case optLarge:
+	case "large":
 		// FIXME Networks are kept small since large ones use too much CPU.
 		numSeeds = r.Intn(2)
 		numLightClients = r.Intn(3)
@@ -191,7 +196,7 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 
 	// First we generate seed nodes, starting at the initial height.
 	for i := 1; i <= numSeeds; i++ {
-		manifest.Nodes[fmt.Sprintf("seed%02d", i)] = generateNode(
+		manifest.NodesMap[fmt.Sprintf("seed%02d", i)] = generateNode(
 			r, e2e.ModeSeed, 0, false)
 	}
 
@@ -200,6 +205,7 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 	// the initial validator set, and validator set updates for delayed nodes.
 	nextStartAt := manifest.InitialHeight + 5
 	quorum := numValidators*2/3 + 1
+	var totalWeight int64
 	for i := 1; i <= numValidators; i++ {
 		startAt := int64(0)
 		if i > quorum {
@@ -207,24 +213,42 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 			nextStartAt += 5
 		}
 		name := fmt.Sprintf("validator%02d", i)
-		manifest.Nodes[name] = generateNode(
-			r, e2e.ModeValidator, startAt, i <= 2)
+		manifest.NodesMap[name] = generateNode(r, e2e.ModeValidator, startAt, i <= 2)
 
+		weight := int64(30 + r.Intn(71))
 		if startAt == 0 {
-			(*manifest.Validators)[name] = int64(30 + r.Intn(71))
+			(*manifest.ValidatorsMap)[name] = weight
 		} else {
-			manifest.ValidatorUpdates[fmt.Sprint(startAt+5)] = map[string]int64{
-				name: int64(30 + r.Intn(71)),
-			}
+			manifest.ValidatorUpdatesMap[strconv.FormatInt(startAt+5, 10)] = map[string]int64{name: weight}
 		}
+		totalWeight += weight
+	}
+
+	// Add clock skew only to processes that accumulate less than 1/3 of voting power.
+	var accWeight int64
+	for i := 1; i <= numValidators; i++ {
+		name := fmt.Sprintf("validator%02d", i)
+		startAt := manifest.NodesMap[name].StartAt
+		var weight int64
+		if startAt == 0 {
+			weight = (*manifest.ValidatorsMap)[name]
+		} else {
+			weight = manifest.ValidatorUpdatesMap[strconv.FormatInt(startAt+5, 10)][name]
+		}
+
+		if accWeight > totalWeight*2/3 {
+			// Interval: [-500ms, 59s500ms)
+			manifest.NodesMap[name].ClockSkew = time.Duration(int64(r.Float64()*float64(time.Minute))) - 500*time.Millisecond
+		}
+		accWeight += weight
 	}
 
 	// Move validators to InitChain if specified.
 	switch opt["validators"].(string) {
 	case "genesis":
 	case "initchain":
-		manifest.ValidatorUpdates["0"] = *manifest.Validators
-		manifest.Validators = &map[string]int64{}
+		manifest.ValidatorUpdatesMap["0"] = *manifest.ValidatorsMap
+		manifest.ValidatorsMap = &map[string]int64{}
 	default:
 		return manifest, fmt.Errorf("invalid validators option %q", opt["validators"])
 	}
@@ -236,7 +260,7 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 			startAt = nextStartAt
 			nextStartAt += 5
 		}
-		manifest.Nodes[fmt.Sprintf("full%02d", i)] = generateNode(
+		manifest.NodesMap[fmt.Sprintf("full%02d", i)] = generateNode(
 			r, e2e.ModeFull, startAt, false)
 	}
 
@@ -244,8 +268,8 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 	// each other, while non-seed nodes either use a set of random seeds or a
 	// set of random peers that start before themselves.
 	var seedNames, peerNames, lightProviders []string
-	for name, node := range manifest.Nodes {
-		if node.Mode == string(e2e.ModeSeed) {
+	for name, node := range manifest.NodesMap {
+		if node.ModeStr == string(e2e.ModeSeed) {
 			seedNames = append(seedNames, name)
 		} else {
 			// if the full node or validator is an ideal candidate, it is added as a light provider.
@@ -260,7 +284,7 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 	for _, name := range seedNames {
 		for _, otherName := range seedNames {
 			if name != otherName {
-				manifest.Nodes[name].Seeds = append(manifest.Nodes[name].Seeds, otherName)
+				manifest.NodesMap[name].SeedsList = append(manifest.NodesMap[name].SeedsList, otherName)
 			}
 		}
 	}
@@ -268,9 +292,9 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 	sort.Slice(peerNames, func(i, j int) bool {
 		iName, jName := peerNames[i], peerNames[j]
 		switch {
-		case manifest.Nodes[iName].StartAt < manifest.Nodes[jName].StartAt:
+		case manifest.NodesMap[iName].StartAt < manifest.NodesMap[jName].StartAt:
 			return true
-		case manifest.Nodes[iName].StartAt > manifest.Nodes[jName].StartAt:
+		case manifest.NodesMap[iName].StartAt > manifest.NodesMap[jName].StartAt:
 			return false
 		default:
 			return strings.Compare(iName, jName) == -1
@@ -278,19 +302,21 @@ func generateTestnet(r *rand.Rand, opt map[string]any, upgradeVersion string, pr
 	})
 	for i, name := range peerNames {
 		if len(seedNames) > 0 && (i == 0 || r.Float64() >= 0.5) {
-			manifest.Nodes[name].Seeds = uniformSetChoice(seedNames).Choose(r)
+			manifest.NodesMap[name].SeedsList = uniformSetChoice(seedNames).Choose(r)
 		} else if i > 0 {
-			manifest.Nodes[name].PersistentPeers = uniformSetChoice(peerNames[:i]).Choose(r)
+			manifest.NodesMap[name].PersistentPeersList = uniformSetChoice(peerNames[:i]).Choose(r)
 		}
 	}
 
 	// lastly, set up the light clients
 	for i := 1; i <= numLightClients; i++ {
 		startAt := manifest.InitialHeight + 5
-		manifest.Nodes[fmt.Sprintf("light%02d", i)] = generateLightNode(
+		manifest.NodesMap[fmt.Sprintf("light%02d", i)] = generateLightNode(
 			r, startAt+(5*int64(i)), lightProviders,
 		)
 	}
+
+	manifest.NoLanes = opt["no_lanes"].(bool)
 
 	return manifest, nil
 }
@@ -303,18 +329,18 @@ func generateNode(
 	r *rand.Rand, mode e2e.Mode, startAt int64, forceArchive bool,
 ) *e2e.ManifestNode {
 	node := e2e.ManifestNode{
-		Version:               nodeVersions.Choose(r).(string),
-		Mode:                  string(mode),
-		StartAt:               startAt,
-		Database:              nodeDatabases.Choose(r).(string),
-		PrivvalProtocol:       nodePrivvalProtocols.Choose(r).(string),
-		BlockSyncVersion:      nodeBlockSyncs.Choose(r).(string),
-		BlockSyncAdaptiveSync: nodeBlockSyncAdaptiveSync.Choose(r).(bool),
-		StateSync:             nodeStateSyncs.Choose(r).(bool) && startAt > 0,
-		PersistInterval:       ptrUint64(uint64(nodePersistIntervals.Choose(r).(int))),
-		SnapshotInterval:      uint64(nodeSnapshotIntervals.Choose(r).(int)),
-		RetainBlocks:          uint64(nodeRetainBlocks.Choose(r).(int)),
-		Perturb:               nodePerturbations.Choose(r),
+		Version:                nodeVersions.Choose(r).(string),
+		ModeStr:                string(mode),
+		StartAt:                startAt,
+		Database:               nodeDatabases.Choose(r).(string),
+		PrivvalProtocolStr:     nodePrivvalProtocols.Choose(r).(string),
+		BlockSyncVersion:       nodeBlockSyncs.Choose(r).(string),
+		StateSync:              nodeStateSyncs.Choose(r).(bool) && startAt > 0,
+		PersistIntervalPtr:     ptrUint64(uint64(nodePersistIntervals.Choose(r).(int))),
+		SnapshotInterval:       uint64(nodeSnapshotIntervals.Choose(r).(int)),
+		RetainBlocks:           uint64(nodeRetainBlocks.Choose(r).(int)),
+		EnableCompanionPruning: false,
+		Perturb:                nodePerturbations.Choose(r),
 	}
 
 	// If this node is forced to be an archive node, retain all blocks and
@@ -326,23 +352,29 @@ func generateNode(
 
 	// If a node which does not persist state also does not retain blocks, randomly
 	// choose to either persist state or retain all blocks.
-	if node.PersistInterval != nil && *node.PersistInterval == 0 && node.RetainBlocks > 0 {
+	if node.PersistIntervalPtr != nil && *node.PersistIntervalPtr == 0 && node.RetainBlocks > 0 {
 		if r.Float64() > 0.5 {
 			node.RetainBlocks = 0
 		} else {
-			node.PersistInterval = ptrUint64(node.RetainBlocks)
+			node.PersistIntervalPtr = ptrUint64(node.RetainBlocks)
 		}
 	}
 
 	// If either PersistInterval or SnapshotInterval are greater than RetainBlocks,
 	// expand the block retention time.
 	if node.RetainBlocks > 0 {
-		if node.PersistInterval != nil && node.RetainBlocks < *node.PersistInterval {
-			node.RetainBlocks = *node.PersistInterval
+		if node.PersistIntervalPtr != nil && node.RetainBlocks < *node.PersistIntervalPtr {
+			node.RetainBlocks = *node.PersistIntervalPtr
 		}
 		if node.RetainBlocks < node.SnapshotInterval {
 			node.RetainBlocks = node.SnapshotInterval
 		}
+	}
+
+	// Only randomly enable data companion-related pruning on 50% of the full
+	// nodes and validators.
+	if mode == e2e.ModeFull || mode == e2e.ModeValidator {
+		node.EnableCompanionPruning = nodeEnableCompanionPruning.Choose(r).(bool)
 	}
 
 	return &node
@@ -350,13 +382,13 @@ func generateNode(
 
 func generateLightNode(r *rand.Rand, startAt int64, providers []string) *e2e.ManifestNode {
 	return &e2e.ManifestNode{
-		Mode:            string(e2e.ModeLight),
-		Version:         nodeVersions.Choose(r).(string),
-		StartAt:         startAt,
-		Database:        nodeDatabases.Choose(r).(string),
-		PersistInterval: ptrUint64(0),
-		PersistentPeers: providers,
-		Perturb:         lightNodePerturbations.Choose(r),
+		ModeStr:             string(e2e.ModeLight),
+		Version:             nodeVersions.Choose(r).(string),
+		StartAt:             startAt,
+		Database:            nodeDatabases.Choose(r).(string),
+		PersistIntervalPtr:  ptrUint64(0),
+		PersistentPeersList: providers,
+		Perturb:             lightNodePerturbations.Choose(r),
 	}
 }
 
@@ -372,47 +404,32 @@ func ptrUint64(i uint64) *uint64 {
 // Also returns the last version in the list, which will be used for updates.
 func parseWeightedVersions(s string) (weightedChoice, string, error) {
 	wc := make(weightedChoice)
-	var lastVersion string
-
-	entries := strings.Split(strings.TrimSpace(s), ",")
-
-	for _, entry := range entries {
-		parts := strings.Split(strings.TrimSpace(entry), ":")
-
+	lv := ""
+	wvs := strings.Split(strings.TrimSpace(s), ",")
+	for _, wv := range wvs {
+		parts := strings.Split(strings.TrimSpace(wv), ":")
 		var ver string
 		switch len(parts) {
 		case 2:
-			// tag:weight → assume default image
-			ver = strings.TrimSpace(
-				strings.Join([]string{"cometbft/e2e-node", parts[0]}, ":"),
-			)
+			ver = strings.TrimSpace(strings.Join([]string{"cometbft/e2e-node", parts[0]}, ":"))
 		case 3:
-			// image:tag:weight
-			ver = strings.TrimSpace(
-				strings.Join([]string{parts[0], parts[1]}, ":"),
-			)
+			ver = strings.TrimSpace(strings.Join([]string{parts[0], parts[1]}, ":"))
 		default:
-			return nil, "", fmt.Errorf(
-				"unexpected weight:version combination: %s",
-				entry,
-			)
+			return nil, "", fmt.Errorf("unexpected weight:version combination: %s", wv)
 		}
 
-		weightStr := strings.TrimSpace(parts[len(parts)-1])
-		weight, err := strconv.Atoi(weightStr)
+		wt, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1]))
 		if err != nil {
-			return nil, "", fmt.Errorf("unexpected weight %q: %w", weightStr, err)
+			return nil, "", fmt.Errorf("unexpected weight \"%s\": %w", parts[1], err)
 		}
 
-		if weight < 1 {
+		if wt < 1 {
 			return nil, "", errors.New("version weights must be >= 1")
 		}
-
-		wc[ver] = uint(weight)
-		lastVersion = ver
+		wc[ver] = uint(wt)
+		lv = ver
 	}
-
-	return wc, lastVersion, nil
+	return wc, lv, nil
 }
 
 // Extracts the latest release version from the given Git repository. Uses the
@@ -438,7 +455,7 @@ func gitRepoLatestReleaseVersion(gitRepoDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return findLatestReleaseTag(version.TMCoreSemVer, tags)
+	return findLatestReleaseTag(version.CMTSemVer, tags)
 }
 
 func findLatestReleaseTag(baseVer string, tags []string) (string, error) {
